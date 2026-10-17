@@ -1,0 +1,6 @@
+LIBRARY "GrandMPRemotePedExperimental.asi"
+EXPORTS
+    InitializeASI
+    GrandMPPedSmokeStatus
+    GrandMPPedSmokeCallbackCount
+    GrandMPPedSmokeRequestRemoval

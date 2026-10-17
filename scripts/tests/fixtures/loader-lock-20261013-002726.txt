@@ -1,0 +1,158 @@
+# Regression excerpt: build/runtime-evidence/20261013-002726/01-loader-lock.txt. Raw source SHA256: A4516AA63477D066736C69331F63419B6100660A4A3E56DA5CA5DAA83E171A71
+0:000> .symopt- 0x40
+Symbol options are 0xB0327:
+  0x00000001 - SYMOPT_CASE_INSENSITIVE
+  0x00000002 - SYMOPT_UNDNAME
+  0x00000004 - SYMOPT_DEFERRED_LOADS
+  0x00000020 - SYMOPT_OMAP_FIND_NEAREST
+  0x00000100 - SYMOPT_NO_UNQUALIFIED_LOADS
+  0x00000200 - SYMOPT_FAIL_CRITICAL_ERRORS
+  0x00010000 - SYMOPT_AUTO_PUBLICS
+  0x00020000 - SYMOPT_NO_IMAGE_SEARCH
+  0x00080000 - SYMOPT_NO_PROMPTS
+0:000> .symopt+ 0x400
+Symbol options are 0xB0727:
+  0x00000001 - SYMOPT_CASE_INSENSITIVE
+  0x00000002 - SYMOPT_UNDNAME
+  0x00000004 - SYMOPT_DEFERRED_LOADS
+  0x00000020 - SYMOPT_OMAP_FIND_NEAREST
+  0x00000100 - SYMOPT_NO_UNQUALIFIED_LOADS
+  0x00000200 - SYMOPT_FAIL_CRITICAL_ERRORS
+  0x00000400 - SYMOPT_EXACT_SYMBOLS
+  0x00010000 - SYMOPT_AUTO_PUBLICS
+  0x00020000 - SYMOPT_NO_IMAGE_SEARCH
+  0x00080000 - SYMOPT_NO_PROMPTS
+LL_CAPTURE_BEGIN
+0:000> .printf "LL_CONTEXT pid=%x tid=%x eip=%p entry=%p peb=%p\n", @$tpid, @$tid, @eip, @$t9, @$peb
+LL_CONTEXT pid=
+SYMSRV:  BYINDEX: 0x7
+         D:\Programacao\Workspace\Applications\grandmp\build\runtime-evidence\symbols*https://msdl.microsoft.com/download/symbols
+         dinput8.pdb
+         0DAA77D6D1B7446399A4093B89C5CD041
+SYMSRV:  UNC: D:\Programacao\Workspace\Applications\grandmp\build\runtime-evidence\symbols\dinput8.pdb\0DAA77D6D1B7446399A4093B89C5CD041\msfz0\dinput8.pdb - path not found
+SYMSRV:  UNC: D:\Programacao\Workspace\Applications\grandmp\build\runtime-evidence\symbols\dinput8.pdb\0DAA77D6D1B7446399A4093B89C5CD041\dinput8.pdb - path not found
+SYMSRV:  UNC: D:\Programacao\Workspace\Applications\grandmp\build\runtime-evidence\symbols\dinput8.pdb\0DAA77D6D1B7446399A4093B89C5CD041\dinput8.pd_ - path not found
+SYMSRV:  UNC: D:\Programacao\Workspace\Applications\grandmp\build\runtime-evidence\symbols\dinput8.pdb\0DAA77D6D1B7446399A4093B89C5CD041\file.ptr - path not found
+SYMSRV:  HTTPGET: /download/symbols/dinput8.pdb/0DAA77D6D1B7446399A4093B89C5CD041/dinput8.pdb
+SYMSRV:  HttpQueryInfo: 800C0194
+SYMSRV:  HTTPGET: /download/symbols/dinput8.pdb/0DAA77D6D1B7446399A4093B89C5CD041/dinput8.pd_
+SYMSRV:  HttpQueryInfo: 800C0194
+SYMSRV:  HTTPGET: /download/symbols/dinput8.pdb/0DAA77D6D1B7446399A4093B89C5CD041/file.ptr
+SYMSRV:  HttpQueryInfo: 800C0194
+SYMSRV:  RESULT: 0x80190194
+DBGHELP: d:\programacao\workspace\applications\grandmp\build\alpha027-win32\client\windows\debug\dinput8.pdb - file not found
+DBGHELP: d:\programacao\workspace\applications\grandmp\build\alpha027-win32\client\windows\debug\dll\dinput8.pdb - file not found
+DBGHELP: d:\programacao\workspace\applications\grandmp\build\alpha027-win32\client\windows\debug\symbols\dll\dinput8.pdb - file not found
+DBGHELP: D:\Jogos\GrandMP-Smoke\dinput8.pdb - file not found
+DBGHELP: D:\a\Ultimate-ASI-Loader\Ultimate-ASI-Loader\bin\Win32\Release\dinput8.pdb - file not found
+*** WARNING: Unable to verify checksum for D:\Jogos\GrandMP-Smoke\DINPUT8.dll
+DBGHELP: DINPUT8 - no symbols loaded
+4c80 tid=5b04 eip=715445f0 entry=715445f0 peb=00291000
+0:000> |
+.  0	id: 4c80	create	name: gta_sa.exe
+0:000> ~
+.  0  Id: 4c80.5b04 Suspend: 1 Teb: 00294000 Unfrozen
+   1  Id: 4c80.5e54 Suspend: 1 Teb: 00298000 Unfrozen
+   2  Id: 4c80.55cc Suspend: 1 Teb: 002a8000 Unfrozen
+   3  Id: 4c80.24c4 Suspend: 1 Teb: 002a0000 Unfrozen
+0:000> r
+eax=71541b59 ebx=75a02c80 ecx=83fd88ad edx=00030000 esi=00000000 edi=0177f990
+eip=715445f0 esp=0177f75c ebp=0177f8a8 iopl=0         nv up ei pl nz na pe nc
+cs=0023  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00200206
+GrandMP!InitializeASI:
+715445f0 55              push    ebp
+LL_NTDLL_SYMBOLS_BEGIN
+0:000> vertarget
+Windows 10 Version 26200 MP (12 procs) Free x86 compatible
+Product: WinNt, suite: SingleUserTS
+Edition build lab: 26100.1.amd64fre.ge_release.240331-1435
+Debug session time: Tue Oct 13 00:27:38.672 2026 (UTC - 3:00)
+System Uptime: 0 days 8:13:01.106
+Process Uptime: 0 days 0:00:09.032
+  Kernel time: 0 days 0:00:00.125
+  User time: 0 days 0:00:00.078
+0:000> lmvm ntdll
+start    end        module name
+778a0000 77a5f000   ntdll      (pdb symbols)          D:\Programacao\Workspace\Applications\grandmp\build\runtime-evidence\symbols\wntdll.pdb\7C1F7D48576AAE47EB48E43D5FB752AD1\wntdll.pdb
+    Loaded symbol image file: C:\Windows\SYSTEM32\ntdll.dll
+    Image path: ntdll.dll
+    Image name: ntdll.dll
+    Image was built with /Brepro flag.
+    Timestamp:        427CC5BD (This is a reproducible build file hash, not a timestamp)
+    CheckSum:         001C0DF7
+    ImageSize:        001BF000
+    File version:     10.0.26100.9444
+    Product version:  10.0.26100.9444
+    File flags:       0 (Mask 3F)
+    File OS:          40004 NT Win32
+    File type:        2.0 Dll
+    File date:        00000000.00000000
+    Translations:     0409.04b0
+    Information from resource tables:
+        CompanyName:      Microsoft Corporation
+        ProductName:      Microsoft� Windows� Operating System
+        InternalName:     ntdll.dll
+        OriginalFilename: ntdll.dll
+        ProductVersion:   10.0.26100.9444
+        FileVersion:      10.0.26100.9444 (WinBuild.160101.0800)
+        FileDescription:  NT Layer DLL
+        LegalCopyright:   � Microsoft Corporation. All rights reserved.
+0:000> !lmi ntdll
+Loaded Module Info: [ntdll]
+         Module: ntdll
+   Base Address: 778a0000
+     Image Name: ntdll.dll
+   Machine Type: 332 (I386)
+     Time Stamp: 427cc5bd (This is a reproducible build file hash, not a true timestamp)
+           Size: 1bf000
+       CheckSum: 1c0df7
+Characteristics: 2102
+Debug Data Dirs: Type  Size     VA  Pointer
+             CODEVIEW    23, 27bc8,   26fc8 RSDS - GUID: {7C1F7D48-576A-AE47-EB48-E43D5FB752AD}
+               Age: 1, Pdb: wntdll.pdb
+                 POGO   584, 27bec,   26fec [Data not mapped]
+                REPRO    24, 28170,   27570 Reproducible build
+           DLLCHAR_EX     4, 28194,   27594 Extended DLL characteristics: 00000081
+                                                 CET compatible
+                                                 (Unknown)
+     Image Type: FILE     - Image read successfully from debugger.
+                 C:\Windows\SYSTEM32\ntdll.dll
+    Symbol Type: PDB      - Symbols loaded successfully from symbol server.
+                 D:\Programacao\Workspace\Applications\grandmp\build\runtime-evidence\symbols\wntdll.pdb\7C1F7D48576AAE47EB48E43D5FB752AD1\wntdll.pdb
+    Load Report: public symbols , not source indexed
+                 D:\Programacao\Workspace\Applications\grandmp\build\runtime-evidence\symbols\wntdll.pdb\7C1F7D48576AAE47EB48E43D5FB752AD1\wntdll.pdb
+0:000> .echo LL_NTDLL_SYMBOLS_END
+LL_NTDLL_SYMBOLS_END
+0:000> .echo LL_FIELD_BEGIN
+LL_FIELD_BEGIN
+0:000> dt ntdll!_PEB @$peb LoaderLock
+   +0x0a0 LoaderLock : 0x779d6354 _RTL_CRITICAL_SECTION
+0:000> .echo LL_FIELD_END
+LL_FIELD_END
+0:000> .echo LL_FIELD_ADDRESS_BEGIN
+LL_FIELD_ADDRESS_BEGIN
+0:000> ?? &((ntdll!_PEB*)@$peb)->LoaderLock
+struct _RTL_CRITICAL_SECTION ** 0x002910a0
+0:000> .echo LL_FIELD_ADDRESS_END
+LL_FIELD_ADDRESS_END
+0:000> .echo LL_OBJECT_BEGIN
+LL_OBJECT_BEGIN
+0:000> ?? ((ntdll!_PEB*)@$peb)->LoaderLock
+struct _RTL_CRITICAL_SECTION * 0x779d6354
+   +0x000 DebugInfo        : 0x779d6724 _RTL_CRITICAL_SECTION_DEBUG
+   +0x004 LockCount        : 0n-1
+   +0x008 RecursionCount   : 0n0
+   +0x00c OwningThread     : (null)
+   +0x010 LockSemaphore    : (null)
+   +0x014 SpinCount        : 0x4000000
+0:000> .echo LL_OBJECT_END
+LL_OBJECT_END
+0:000> .echo LL_CAPTURE_DONE
+LL_CAPTURE_DONE
+0:000> bc *
+0:000> .detach /h
+Detached
+NoTarget> .logclose
+WARNING: The debugger does not have a current process or thread
+WARNING: Many commands will not work
+Closing open log file D:\Programacao\Workspace\Applications\grandmp\build\runtime-evidence\20261013-002726\01-loader-lock.txt

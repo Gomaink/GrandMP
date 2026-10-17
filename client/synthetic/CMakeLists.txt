@@ -1,0 +1,6 @@
+add_executable(grandmp_synthetic_client main.cpp)
+target_compile_features(grandmp_synthetic_client PRIVATE cxx_std_20)
+target_link_libraries(grandmp_synthetic_client PRIVATE GrandMP::Shared)
+if(WIN32)
+    target_link_libraries(grandmp_synthetic_client PRIVATE ws2_32)
+endif()

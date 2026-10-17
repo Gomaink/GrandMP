@@ -1,0 +1,26 @@
+# Alpha 0.2.6 — viabilidade de callback sem patch
+
+## Decisão deste experimento
+
+`SetTimer`/`TimerProc` funciona no host Win32 isolado deste slice, mas **não foi conectado ao `GrandMP.asi`**. O ASI mantém apenas seu diagnóstico síncrono em `InitializeASI`; não há callback persistente, PIN, leitura do jogador nem alteração de código do GTA. Também não foi preparada build diagnóstica para o jogo, pois os gates de thread e residência não foram satisfeitos.
+
+## Evidências e limites
+
+- O executável Hoodlum local, já identificado por SHA-256 `A559AA772FD136379155EFA71F00C47AAD34BBFEAE6196B0FE1047D0645CBD26`, importa `PeekMessageA`, `TranslateMessage` e `DispatchMessageA` segundo `dumpbin /imports`. Isso demonstra disponibilidade das APIs, não em qual thread ou momento são chamadas. O [WinMain reconstruído em gta-reversed](https://raw.githubusercontent.com/gta-reversed/gta-reversed/master/source/app/platform/win/WinMain.cpp) mostra um loop com `PeekMessageA`/`DispatchMessageA`, mas é referência de reconstrução Compact; não prova a implementação nem a thread do Hoodlum local.
+- Na [fonte do Ultimate ASI Loader v7.7.0](https://raw.githubusercontent.com/ThirteenAG/Ultimate-ASI-Loader/v7.7.0/source/dllmain.cpp), `LoadPlugins` chama a exportação `InitializeASI` na thread que executa `LoadEverything`. Com `DontLoadFromDllMain=1`, essa chamada é adiada por interceptação de API; a fonte não garante que a thread seja a proprietária da janela GTA. Com `0`, o loader pode carregar plugins a partir de seu `DllMain`. Os dois INIs conhecidos em `D:\Jogos\GrandMP-Smoke` declaram `1`, mas sua presença não comprova o contexto de uma chamada concreta nem impede alteração entre leituras.
+- [`GetWindowThreadProcessId`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid) identifica a thread proprietária de uma janela existente. Um timer associado a `HWND` exige que a janela pertença à thread chamadora; um timer sem janela também precisa que a própria thread retire e despache mensagens para executar `TimerProc`, conforme [`SetTimer`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-settimer). A identidade da thread de `InitializeASI` ainda não foi medida dentro do GTA.
+- [`KillTimer`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-killtimer) não remove `WM_TIMER` já postadas. Um timer disparar na thread de mensagens não comprova que objetos do GTA estejam válidos durante menu, loading, troca de partida ou encerramento. A cadência de `WM_TIMER` é aproximada e depende do bombeamento de mensagens; não é um ciclo de simulação nem base para sincronização multiplayer.
+
+## Host isolado
+
+`tests/timer_host_tests.cpp` cria uma janela somente para mensagens, confirma seu processo e thread por `GetWindowThreadProcessId`, carrega `grandmp_timer_probe.dll` do diretório de build e bombeia mensagens com `PeekMessageW`/`DispatchMessageW`. A DLL cria um timer de 40 ms associado a essa janela. O host verifica callback na thread proprietária, contagem periódica e desativação lógica sem remover o timer. Antes de `KillTimer`, deixa uma `WM_TIMER` real pendente; depois confirma que a mensagem ainda pode ser retirada e a despacha **enquanto a DLL continua carregada**. Ele drena mensagens e só então descarrega a DLL. Este protocolo é controlado pelo host e não está disponível no GTA.
+
+Na execução observada em Win32 Debug, foram 5 callbacks ativos, 3 com diagnóstico logicamente desativado, IDs iguais de thread proprietária e callback, uma mensagem pendente após `KillTimer` e **zero chamadas tardias de `TimerProc`** ao despachá-la. Uma execução anterior do teste falhou porque exigia uma chamada tardia; essa exigência foi removida. O resultado observado não substitui o aviso da API nem prova ausência de chamadas tardias em outros ambientes. O teste aceita zero ou uma chamada tardia enquanto DLL e estado permanecem válidos.
+
+## Residência e encerramento
+
+O `WindowsClientRuntime` do ASI é temporário. `ModuleResidency` foi testado em processo isolado na Alpha 0.2.5, mas o PIN permanece desabilitado no ASI porque o contexto fora do loader lock não foi comprovado. Para registrar `TimerProc` no GTA seriam necessários, antes da instalação: comprovação de entrada fora do loader lock, PIN bem-sucedido para preservar código, runtime de duração de processo para preservar dados, identidade da thread que despacha mensagens e política para mensagens pendentes. `GetWindowThreadProcessId` sozinho não oferece esses contratos. Desativação lógica deve tornar um callback tardio inofensivo; `KillTimer` sozinho não permite destruir estado ou descarregar o código.
+
+## Recomendação
+
+**Não usar `SetTimer` no ASI para o primeiro smoke de posição agora.** Como candidato, ele serve a um futuro diagnóstico não invasivo de IDs de thread e contagem de mensagens se os gates acima forem comprovados. Mesmo um smoke positivo desse diagnóstico não autorizaria `FindPlayerPed`/`FindPlayerCoors`; segurança da fase do jogo e do ped exigiria validação própria. Um hook de atualização verificado oferece contexto mais próximo do ciclo do jogo, mas o patch concorrente do CALL ainda não tem mecanismo seguro demonstrado. Bibliotecas auditadas de hooking permanecem alternativa de pesquisa; nenhuma foi incorporada neste slice.

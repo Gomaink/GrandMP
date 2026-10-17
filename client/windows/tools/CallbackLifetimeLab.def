@@ -1,0 +1,3 @@
+LIBRARY grandmp_callback_lifetime_module
+EXPORTS
+    GmpLabGetApi

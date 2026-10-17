@@ -1,0 +1,13 @@
+EXPORTS
+    InitializeASI
+    GrandMPNativeCounterInstallationStatus
+    GrandMPNativeCounterRead
+    GrandMPNativeCounterPrepareHost
+    GrandMPNativeCounterDispatchHost
+    GrandMPNativeCounterDisableHost
+    GrandMPNativeCounterReady DATA
+    GrandMPNativeCounterPrepareTransaction
+    GrandMPNativeCounterWrapperHost
+    GrandMPNativeCounterPrepareDeferred
+    GrandMPNativeCounterShutdown
+    GrandMPNativeCounterConfigureAsyncTest
