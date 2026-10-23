@@ -69,13 +69,21 @@ bool parseLoopbackEndpoint(std::wstring_view address, std::uint16_t& port) noexc
 
 ObserverNetwork::~ObserverNetwork() { stop(); }
 
-void ObserverNetwork::resetRemoteScene() noexcept {
+void ObserverNetwork::resetRemoteScene(core::RemoteEndReason reason) noexcept {
+    if (playerController_) playerController_->beginSession(sessionId_,reason);
     if (sceneSink_) {
         scene_.reset(*sceneSink_);
         // The boundary must precede new-session spawn/poses even when Welcome
         // and its snapshot arrive in the same receivePackets() batch.
         sceneSink_->resetSession();
     }
+}
+
+void ObserverNetwork::setRemotePlayerController(core::RemotePlayerController* controller) noexcept {
+    if (playerController_) playerController_->beginSession(0,core::RemoteEndReason::controller_detached);
+    playerController_=controller;
+    if (playerController_) playerController_->beginSession(sessionId_);
+    lastSnapshotMs_=0;
 }
 
 void ObserverNetwork::setRemoteSceneSink(core::IRemotePlayerSceneSink* sink) noexcept {
@@ -140,6 +148,7 @@ void ObserverNetwork::receivePackets() noexcept {
                 resetRemoteScene();
                 roster_.clear();
                 sessionId_ = welcome->session_id;
+                if (playerController_) playerController_->beginSession(sessionId_);
                 sequence_ = 0;
                 lastSnapshotMs_ = 0;
             }
@@ -161,10 +170,18 @@ void ObserverNetwork::receivePackets() noexcept {
                                   static_cast<unsigned long long>(pos->player_id), pos->sequence,
                                   static_cast<double>(pos->x), static_cast<double>(pos->y),
                                   static_cast<double>(pos->z));
+            } else if (const auto* foot = std::get_if<protocol::RemoteOnFoot>(&*decoded.message)) {
+                if (!playerController_ || foot->recipient_session!=sessionId_ || foot->player_id==sessionId_) continue;
+                const auto& s=foot->state;
+                const auto result=roster_.position({foot->player_id,foot->sequence,s.x,s.y,s.z},now);
+                if (result!=core::RemoteRoster::PositionResult::ignored)
+                    (void)playerController_->receive(*foot,roster_,now);
             } else if (const auto* leave = std::get_if<protocol::RemoteLeave>(&*decoded.message)) {
-                if (roster_.left(*leave, now))
+                if (roster_.left(*leave, now)) {
+                    if (playerController_) playerController_->endRemote(leave->player_id,core::RemoteEndReason::server_leave);
                     std::fwprintf(stdout, L"Jogador remoto %llu saiu.\n",
                                   static_cast<unsigned long long>(leave->player_id));
+                }
             }
         }
     }
@@ -172,8 +189,18 @@ void ObserverNetwork::receivePackets() noexcept {
 
 void ObserverNetwork::sendSnapshotRequest() noexcept {
     if (sessionId_ == 0) return;
+    if (playerController_) (void)sendPacket(nativeSocket(socket_),port_,protocol::OnFootSubscribe{sessionId_});
     (void)sendPacket(nativeSocket(socket_), port_, protocol::SnapshotRequest{sessionId_});
     lastSnapshotMs_ = GetTickCount64();
+}
+
+bool ObserverNetwork::sendOnFoot(const core::OnFootState& sample) noexcept {
+    if (!playerController_ || !sessionId_ || !core::validOnFoot(sample) ||
+        sequence_==std::numeric_limits<std::uint32_t>::max()) return false;
+    const auto next=sequence_+1;
+    if (!sendPacket(nativeSocket(socket_),port_,protocol::PlayerOnFoot{sessionId_,next,sample})) return false;
+    sequence_=next;
+    return true;
 }
 
 void ObserverNetwork::sendPosition(const Coordinates& position) noexcept {
@@ -200,7 +227,7 @@ void ObserverNetwork::tick(std::optional<Coordinates> position) noexcept {
     const std::uint64_t now = GetTickCount64();
     if (sessionId_ != 0 && now - lastWelcomeMs_ >= welcomeTimeoutMs) {
         sessionId_ = 0;
-        resetRemoteScene();
+        resetRemoteScene(core::RemoteEndReason::session_timeout);
         roster_.clear();
     }
     if (lastHelloMs_ == 0 || now - lastHelloMs_ >= helloIntervalMs) sendHello();
@@ -210,9 +237,15 @@ void ObserverNetwork::tick(std::optional<Coordinates> position) noexcept {
             sendSnapshotRequest();
         if (position) sendPosition(*position);
     }
-    for (auto id : roster_.expire(core::RemoteRoster::Clock::now()))
+    for (auto id : roster_.expire(core::RemoteRoster::Clock::now())) {
+        if (playerController_) playerController_->endRemote(id,core::RemoteEndReason::roster_timeout);
         std::fwprintf(stdout, L"Jogador remoto %llu expirou.\n",
                       static_cast<unsigned long long>(id));
+    }
+    if (playerController_) {
+        try { playerController_->synchronize(roster_,core::RemoteRoster::Clock::now()); }
+        catch (...) { playerController_->beginSession(0,core::RemoteEndReason::controller_error); }
+    }
     if (sceneSink_) {
         try {
             scene_.synchronize(roster_, core::RemoteRoster::Clock::now(), *sceneSink_);
@@ -235,9 +268,10 @@ void ObserverNetwork::stop() noexcept {
         winsockStarted_ = false;
     }
     sessionId_ = 0;
-    resetRemoteScene();
+    resetRemoteScene(core::RemoteEndReason::network_stopped);
     roster_.clear();
     sceneSink_ = nullptr;
+    playerController_ = nullptr;
     initiated_ = false;
 }
 

@@ -1,6 +1,9 @@
 #pragma once
 #include "remote_ped.hpp"
 #include "ped_smoke_move.hpp"
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
 
 namespace grandmp::windows::remote_ped_move {
 namespace rp = remote_ped;
@@ -11,14 +14,90 @@ inline constexpr bool physicalExecutionApproved = rp::physicalExecutionApproved;
 inline constexpr bool physicalExecutionApproved = false;
 #endif
 inline constexpr float minimumDelta = 2.f, maximumDelta = 4.f;
+inline constexpr float corridorProbeRadius = 0.35f;
+inline constexpr std::size_t collisionDiagnosticCapacity = 320;
+
+enum class CollisionIdentity : std::uint8_t {
+    no_hit,
+    cj_hit,
+    other_entity_hit,
+    unclassified_hit
+};
+
+inline constexpr const char* collisionIdentityName(CollisionIdentity identity) noexcept {
+    switch (identity) {
+    case CollisionIdentity::no_hit: return "no_hit";
+    case CollisionIdentity::cj_hit: return "cj_hit";
+    case CollisionIdentity::other_entity_hit: return "other_entity_hit";
+    case CollisionIdentity::unclassified_hit: return "unclassified_hit";
+    }
+    return "unclassified_hit";
+}
+
+// Hoodlum 0x569E20 returns the candidate CEntity address in EAX; its helper
+// compares that address directly to the ignored CEntity argument. The checked
+// player global holds the CPlayerPed whose CEntity base is at offset zero.
+constexpr CollisionIdentity classifyCollisionIdentity(const void* hitEntity,
+    const void* validatedCj, bool cjIdentityValidated, bool addressRepresentationComparable) noexcept {
+    if (!hitEntity) return CollisionIdentity::no_hit;
+    if (!cjIdentityValidated || !validatedCj || !addressRepresentationComparable)
+        return CollisionIdentity::unclassified_hit;
+    return hitEntity == validatedCj ? CollisionIdentity::cj_hit : CollisionIdentity::other_entity_hit;
+}
+
+struct SphereProbeResult {
+    bool hit = false;
+    CollisionIdentity identity = CollisionIdentity::no_hit;
+};
+
+struct ValidatedEntityIdentity {
+    const void* address = nullptr;
+    bool validated = false;
+};
+
+template<class ValidateCj>
+ValidatedEntityIdentity captureCjIdentity(ValidateCj&& validateCj) {
+    void* cj = nullptr;
+    const bool validated = validateCj(cj);
+    return {cj, validated};
+}
+
+template<class ResolveCjIdentity>
+SphereProbeResult classifySphereResult(const void* hitEntity, ResolveCjIdentity&& resolveCjIdentity) {
+    if (!hitEntity) return {};
+    const auto cj = resolveCjIdentity();
+    return {true, classifyCollisionIdentity(hitEntity, cj.address, cj.validated, true)};
+}
+
+struct CorridorCollisionDiagnostic {
+    unsigned sampleIndex = 0, totalSamples = 0;
+    ps::Position sample{};
+    float distanceFromOrigin = 0.f, radius = corridorProbeRadius;
+    bool nativeHit = false;
+    CollisionIdentity hitIdentity = CollisionIdentity::no_hit;
+};
+
+inline bool formatCollisionDiagnostic(char* output, std::size_t capacity, std::uint64_t generation,
+    std::uint32_t sequence, const CorridorCollisionDiagnostic& diagnostic) noexcept {
+    if (!output || capacity == 0) return false;
+    const int count = std::snprintf(output, capacity,
+        "attempt=1 generation=%llu sequence=%u sample=%u/%u xyz=%.6e,%.6e,%.6e distance=%.6e radius=%.6e native_return=%s hit_identity=%s excluded=owned_ped flags=111110",
+        static_cast<unsigned long long>(generation), sequence, diagnostic.sampleIndex, diagnostic.totalSamples,
+        diagnostic.sample.x, diagnostic.sample.y, diagnostic.sample.z, diagnostic.distanceFromOrigin,
+        diagnostic.radius, diagnostic.nativeHit ? "non_null" : "null", collisionIdentityName(diagnostic.hitIdentity));
+    return count >= 0 && static_cast<std::size_t>(count) < capacity;
+}
 
 template<class Probe>
-const char* findDestination(Probe& probe, ps::Position origin, ps::Position candidate, ps::Position& target) {
+const char* findDestination(Probe& probe, ps::Position origin, ps::Position candidate, ps::Position& target,
+    CorridorCollisionDiagnostic* collision = nullptr) {
+    if (collision) *collision = {};
     if (!ps::finite(origin) || !ps::finite(candidate)) return "candidate_nonfinite";
     const float distance = ps::distance2D(origin, candidate);
     if (distance < 1.f || distance > maximumDelta || std::abs(candidate.z-origin.z)>1.f) return "local_distance_or_height_limit";
     const unsigned steps = static_cast<unsigned>(std::ceil(distance/0.5f));
-    float previousZ = origin.z;
+    ps::Position previous = origin;
+    float accumulatedDistance = 0.f;
     for (unsigned step=1;step<=steps;++step) {
         const float t=static_cast<float>(step)/steps;
         target={origin.x+(candidate.x-origin.x)*t,origin.y+(candidate.y-origin.y)*t,origin.z};
@@ -26,9 +105,14 @@ const char* findDestination(Probe& probe, ps::Position origin, ps::Position cand
         const float ground=probe.ground(target.x,target.y,origin.z+3.f,found);
         if (!found || !std::isfinite(ground)) return "ground_missing_or_nonfinite";
         target.z=ground+1.f;
-        if (!ps::finite(target) || std::abs(target.z-origin.z)>1.f || std::abs(target.z-previousZ)>0.5f) return "ground_step_or_height_limit";
-        if (probe.sphere(target)) return "corridor_sphere_hit";
-        previousZ=target.z;
+        if (!ps::finite(target) || std::abs(target.z-origin.z)>1.f || std::abs(target.z-previous.z)>0.5f) return "ground_step_or_height_limit";
+        accumulatedDistance += std::hypot(ps::distance2D(previous,target),target.z-previous.z);
+        const SphereProbeResult sphere = probe.sphere(target);
+        if (sphere.hit) {
+            if (collision) *collision = {step, steps, target, accumulatedDistance, corridorProbeRadius, true, sphere.identity};
+            return "corridor_sphere_hit";
+        }
+        previous=target;
     }
     return nullptr;
 }
@@ -43,8 +127,13 @@ public:
     bool poisoned() const noexcept { return lifecycle_.poisoned(); }
     ps::MoveState moveState() const noexcept { return movement_.state(); }
     void disable() noexcept { lifecycle_.disable(); }
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+    template<class Engine, class Diagnostic>
+    void tick(Engine& engine, const rp::Intent& incoming, bool nativeThread, bool gameplay, std::uint64_t now, Diagnostic& diagnostic) {
+#else
     template<class Engine>
     void tick(Engine& engine, const rp::Intent& incoming, bool nativeThread, bool gameplay, std::uint64_t now) {
+#endif
         if (!nativeThread || !gameplay || busy_ || poisoned()) return;
         busy_=true;
         struct Leave { bool& busy; ~Leave() { busy=false; } } leave{busy_};
@@ -111,6 +200,9 @@ public:
             ended_=true; engine.moveLog("remote_move_rejected","local_target_distance_limit"); return;
         }
         engine.prepareRemoteMove(candidate);
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+        diagnostic.beforeAttempt(*this); // Metadata before ORIGINAL one-shot Movement tick; never authorizes it.
+#endif
         movement_.tick(engine,lifecycle_.entity(),true,true,true,false,now,distance_);
         ended_=movement_.state()==ps::MoveState::failed;
     }

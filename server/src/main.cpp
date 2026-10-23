@@ -153,6 +153,11 @@ void sendSnapshot(NativeSocket socket, const grandmp::server::SessionTable& sess
             (void)sendMessage(socket, endpoint, grandmp::protocol::RemotePosition{
                 peer.id, pos.sequence, pos.x, pos.y, pos.z});
         }
+        if (sessions.onFootSubscribed(clientId)) {
+            if (const auto foot=sessions.recentOnFoot(peer.id,grandmp::server::SessionTable::Clock::now()))
+                (void)sendMessage(socket,endpoint,grandmp::protocol::RemoteOnFoot{
+                    clientId,peer.id,foot->sequence,foot->state});
+        }
     }
 }
 
@@ -272,9 +277,11 @@ int main(int argc, char* argv[]) {
             sendSnapshot(socket.get(), sessions, event.sessionId, endpoint);
             break;
         case EventKind::snapshot_requested:
+        case EventKind::on_foot_subscribed:
             sendSnapshot(socket.get(), sessions, event.sessionId, endpoint);
             break;
         case EventKind::position_accepted:
+        case EventKind::on_foot_accepted:
             if (event.position) {
                 const auto& p = *event.position;
                 broadcast(socket.get(), sessions, event.sessionId,
@@ -283,6 +290,13 @@ int main(int argc, char* argv[]) {
                 std::cout << std::fixed << std::setprecision(3) << "Sessão " << event.sessionId
                           << " seq=" << p.sequence << " X=" << p.x << " Y=" << p.y
                           << " Z=" << p.z << '\n';
+            }
+            if (event.onFoot) {
+                for (const auto& peer : sessions.peersExcept(event.sessionId)) {
+                    if (peer.onFootSubscribed)
+                        (void)sendMessage(socket.get(),peer.endpoint,grandmp::protocol::RemoteOnFoot{
+                            peer.id,event.sessionId,event.onFoot->sequence,event.onFoot->state});
+                }
             }
             break;
         case EventKind::disconnected:

@@ -1,5 +1,6 @@
 #pragma once
 #include "ped_smoke_state.hpp"
+#include "ped_smoke_task_layout.hpp"
 #include <array>
 
 namespace grandmp::windows::ped_smoke::movement_native {
@@ -7,7 +8,7 @@ namespace grandmp::windows::ped_smoke::movement_native {
 // layouts. Evidence, source revisions and ownership: docs/ped-smoke-movement.md.
 inline constexpr std::uintptr_t allocateTask = 0x61A5A0, constructWalk = 0x668120, setTask = 0x681AF0;
 inline constexpr std::uintptr_t taskPool = 0xB744A8, walkVtable = 0x86FDA8;
-inline constexpr unsigned taskSize = 0x28, taskStride = 0x80, primarySlot = 3;
+inline constexpr unsigned taskSize = 0x28, taskStride = 0x80, primarySlot = task_layout::primarySlot;
 using Allocate = void*(__cdecl*)(unsigned);
 // Six ORIGINAL arguments. The seventh tracking argument in Reversed is NOTSA.
 using Construct = void*(__thiscall*)(void*, int, const Position&, float, float, bool, bool);

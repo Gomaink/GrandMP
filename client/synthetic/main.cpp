@@ -17,11 +17,13 @@
 #endif
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <limits>
 #include <span>
 #include <string_view>
 #include <variant>
@@ -115,11 +117,12 @@ bool parsePort(int argc, char** argv, std::uint16_t& port) {
 
 int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
-        std::puts("Uso: grandmp_synthetic_client [--port 7777] (127.0.0.1, Ctrl+C encerra)");
+        std::puts("Uso: grandmp_synthetic_client [--port 7777] [--on-foot-demo] (loopback; demo emits walk/turn/stop INPUT, not GTA movement)");
         return 0;
     }
     std::uint16_t port = 7777;
-    if (!parsePort(argc, argv, port)) return 2;
+    const bool onFootDemo=(argc==4 && std::string_view(argv[3])=="--on-foot-demo");
+    if (!parsePort(onFootDemo ? 3 : argc, argv, port)) return 2;
     SocketRuntime runtime;
     if (!runtime.ready()) return 2;
     SocketGuard socket(::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
@@ -144,6 +147,12 @@ int main(int argc, char** argv) {
     auto lastSnapshot = Clock::time_point{};
     auto lastWelcome = Clock::time_point{};
     auto lastPosition = Clock::time_point{};
+    auto demoStarted = Clock::time_point{};
+    const char* demoPhase = "awaiting_session";
+    const char* exitReason = "operator_stop";
+    // MSVC requires a positive size for buffered/line-buffered modes. Use its
+    // supported unbuffered mode so phase/exit evidence is visible through pipes.
+    if (std::setvbuf(stdout,nullptr,_IONBF,0)!=0) return 2;
     std::puts("GrandMP Synthetic Client -- apenas loopback. Ctrl+C encerra.");
     while (!stopped()) {
         const auto now = Clock::now();
@@ -152,6 +161,10 @@ int main(int argc, char** argv) {
             lastHello = now;
         }
         if (id && now - lastWelcome >= std::chrono::seconds(10)) {
+            // The demo never resets sequence on an uncertain existing session.
+            // End deliberately instead of re-Hello/reusing an old server ID.
+            if (onFootDemo) { exitReason="welcome_timeout";break; }
+            std::printf("session_ended id=%llu reason=welcome_timeout\n",static_cast<unsigned long long>(id));
             id = 0;
             sequence = 0;
             roster.clear();
@@ -165,6 +178,7 @@ int main(int argc, char** argv) {
 #else
         const int ready = select(socket.get() + 1, &readable, nullptr, nullptr, &timeout);
 #endif
+        if (ready<0) { exitReason=stopped() ? "operator_stop" : "socket_error";break; }
         if (ready > 0) {
             std::array<std::uint8_t, grandmp::protocol::kMaxPacketSize + 1> bytes{};
             sockaddr_in from{};
@@ -188,6 +202,9 @@ int main(int argc, char** argv) {
                                 sequence = 0;
                                 roster.clear();
                                 lastSnapshot = Clock::time_point{};
+                                lastPosition = Clock::time_point{};
+                                demoStarted = Clock::time_point{};
+                                demoPhase = "awaiting_session";
                                 std::printf("Sessao %llu estabelecida.\n",
                                     static_cast<unsigned long long>(id));
                             }
@@ -227,18 +244,47 @@ int main(int argc, char** argv) {
         }
         if (id && (lastPosition == Clock::time_point{} ||
                    after - lastPosition >= std::chrono::milliseconds(200))) {
+            if (sequence==std::numeric_limits<std::uint32_t>::max()) { exitReason="sequence_exhausted";break; }
             ++sequence;
             // Movimento sintetico lento, sempre dentro dos limites validados.
             const float x = 100.0f + static_cast<float>(sequence % 1000) / 10.0f;
-            (void)sendPacket(socket.get(), server, grandmp::protocol::PlayerPosition{
-                id, sequence, x, 200.0f, 30.0f});
+            if (onFootDemo) {
+                // Synthetic on-foot source ONLY. No capture of GTA memory/CPad.
+                grandmp::core::OnFootState sample{};
+                if (demoStarted==Clock::time_point{}) demoStarted=after;
+                const auto elapsed=std::chrono::duration<float>(after-demoStarted).count();
+                // One walk/turn/stop sequence; thereafter keep sending neutral
+                // input on the SAME session until the operator deliberately exits.
+                sample.x=100.f+std::min(elapsed,1.f);
+                sample.y=200.f+std::clamp(elapsed-1.f,0.f,1.f);
+                sample.z=30.f;
+                const char* phase=elapsed<1.f ? "walk" : elapsed<2.f ? "turn" : "stop_connected";
+                if (elapsed<1.f) { sample.controls.forward=1; sample.vx=1; }
+                else if (elapsed<2.f) { sample.controls.right=1; sample.vy=1; }
+                if (elapsed>=1.f) sample.heading=1.5707963f;
+                if (elapsed<2.f) sample.controls.buttons=grandmp::core::PlayerControls::walk;
+                if (std::string_view(phase)!=demoPhase) {
+                    demoPhase=phase;
+                    std::printf("on_foot_demo id=%llu seq=%u phase=%s\n",static_cast<unsigned long long>(id),sequence,phase);
+                }
+                if (!sendPacket(socket.get(),server,grandmp::protocol::PlayerOnFoot{id,sequence,sample})) {
+                    exitReason="on_foot_send_failed";break;
+                }
+            } else {
+                (void)sendPacket(socket.get(), server, grandmp::protocol::PlayerPosition{
+                    id, sequence, x, 200.0f, 30.0f});
+            }
             lastPosition = after;
         }
         for (const auto expired : roster.expire(after))
             std::printf("Remoto %llu expirou.\n",
                         static_cast<unsigned long long>(expired));
     }
-    if (id) (void)sendPacket(socket.get(), server, grandmp::protocol::Disconnect{id});
+    if (id) {
+        const bool sent=sendPacket(socket.get(), server, grandmp::protocol::Disconnect{id});
+        std::printf("session_ended id=%llu seq=%u reason=%s disconnect_sent=%u\n",
+            static_cast<unsigned long long>(id),sequence,exitReason,sent ? 1u : 0u);
+    }
     std::puts("Cliente sintetico encerrado.");
-    return 0;
+    return std::string_view(exitReason)=="operator_stop" ? 0 : 2;
 }

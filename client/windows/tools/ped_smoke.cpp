@@ -5,11 +5,27 @@
 
 #include "grandmp/windows/executable_detection.hpp"
 #include "ped_smoke_addresses.hpp"
+#include "ped_smoke_install_diagnostics.hpp"
 #include "ped_smoke_phase.hpp"
 #include "ped_smoke_state.hpp"
 #include "ped_smoke_spawn.hpp"
 #include "ped_smoke_move.hpp"
 #include "ped_smoke_move_native.hpp"
+#include "ped_smoke_runtime_read.hpp"
+#include "ped_smoke_code_identity.hpp"
+#if defined(GRANDMP_PASSIVE_MOVEMENT_DIAGNOSTIC_BUILD) && GRANDMP_PASSIVE_MOVEMENT_DIAGNOSTIC_BUILD == 1
+#if !defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) || GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD != 1
+#error Passive movement diagnostics require the exclusive task diagnostic variant
+#endif
+#endif
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+#if !defined(GRANDMP_REMOTE_PED_VARIANT) || !defined(GRANDMP_REMOTE_PED_MOVE_VARIANT)
+#error Task diagnostics require the remote one-walk variant
+#endif
+#include "native_diagnostic_integration.hpp"
+#include "native_diagnostic_windows.hpp"
+#include "native_diagnostic_worker.hpp"
+#endif
 #if defined(GRANDMP_REMOTE_PED_VARIANT)
 #include "remote_ped.hpp"
 #include "remote_ped_network.hpp"
@@ -17,6 +33,15 @@
 #include "remote_ped_move.hpp"
 #endif
 #include "grandmp/windows/observer_network.hpp"
+#endif
+
+#if defined(GRANDMP_CPLAYER_VARIANT)
+#include "native_second_player.hpp"
+#if defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) && GRANDMP_NATIVE_INPUT_REPLAY_BUILD == 1
+#include "native_player_replay.hpp"
+#endif
+#include "remote_ped_network.hpp"
+#include <optional>
 #endif
 
 #include <algorithm>
@@ -38,11 +63,19 @@ std::atomic<bool> removalRequested{false};
 std::atomic<bool> hookPublished{false}, runtimeDisabled{false};
 // Bootstrap handshake: 0 idle, 1 armed, 2 executing on window thread, 3 done, 4 cancelled.
 std::atomic<unsigned> installation{0};
-std::atomic<bool> installationSucceeded{false};
+std::atomic<std::uint32_t> installCandidateFailure{static_cast<std::uint32_t>(ps::InstallFailure::none)};
+std::atomic<std::uint32_t> installCandidateError{0};
+std::atomic<bool> installCandidateHasError{false};
+std::atomic<std::uint32_t> installCandidateCleanupFailure{static_cast<std::uint32_t>(ps::InstallFailure::none)};
+std::atomic<std::uint32_t> installCandidateCleanupError{0};
+std::atomic<bool> installCandidateCleanupHasError{false};
 ps::CallBytes installedCall{};
+#if !defined(GRANDMP_CPLAYER_VARIANT)
 ps::Experiment experiment;
 ps::Movement movement;
+#endif
 DWORD gameThread = 0;
+bool phaseDispatchActive = false; // Accessed only after authenticating gameThread.
 HANDLE executableFile = INVALID_HANDLE_VALUE; // Retained for installed profile lifetime.
 std::vector<std::byte> executable;
 
@@ -53,7 +86,9 @@ void writeLog(const char* state, const char* reason, std::uintptr_t ped = 0) noe
     wchar_t* slash = std::wcsrchr(path, L'\\');
     if (!slash) return;
     constexpr wchar_t filename[] =
-#if defined(GRANDMP_REMOTE_PED_MOVE_VARIANT)
+#if defined(GRANDMP_CPLAYER_VARIANT)
+        L"GrandMPNativePlayerExperimental.log";
+#elif defined(GRANDMP_REMOTE_PED_MOVE_VARIANT)
         L"GrandMPRemotePedMoveExperimental.log";
 #elif defined(GRANDMP_REMOTE_PED_VARIANT)
         L"GrandMPRemotePedExperimental.log";
@@ -64,7 +99,7 @@ void writeLog(const char* state, const char* reason, std::uintptr_t ped = 0) noe
     wcscpy_s(slash + 1, std::size(path) - (slash - path + 1), filename);
     const HANDLE file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
-    char line[320]{};
+    char line[512]{};
     const int count = std::snprintf(line, sizeof(line),
         "[GrandMPPedSmoke] state=%s reason=%s pid=%lu tid=%lu ped=%08lX callback=%u\r\n",
         state, reason, GetCurrentProcessId(), GetCurrentThreadId(), ped, callbacks.load());
@@ -80,8 +115,7 @@ template<class... Args> void writeSpawnLog(const char* format, Args... args) noe
 }
 
 template<class T> bool read(std::uintptr_t address, T& value) noexcept {
-    SIZE_T count = 0;
-    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), &value, sizeof(value), &count) && count == sizeof(value);
+    return ps::readMemory(address, &value, sizeof(value)).complete(sizeof(value));
 }
 bool imagePage(std::uint32_t address, std::size_t size, bool code) noexcept {
     MEMORY_BASIC_INFORMATION page{};
@@ -112,26 +146,35 @@ const std::byte* diskBytes(std::uint32_t address, std::size_t size) noexcept {
     }
     return nullptr;
 }
-bool codeMatches() noexcept {
+bool codeMatches(ps::CodeIdentityFailure* detail = nullptr) noexcept {
+    ps::CodeIdentityFailure local{};
+    auto& failure = detail ? *detail : local;
+    failure = {}; failure.function = "codeMatches";
     std::uint32_t table = 0;
     std::array<std::byte, 512> headers{};
-    SIZE_T headerCount = 0;
-    if (executable.size() < headers.size() || !read(0x408B25, table) || table != ps::streamingTable ||
-        !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(ps::imageBase), headers.data(), headers.size(), &headerCount) ||
-        headerCount != headers.size() || std::memcmp(headers.data(), executable.data(), headers.size())) return false;
+    if (executable.size() < headers.size()) return ps::identityRefuse(failure, "disk_mapping_failed", ps::imageBase, headers.size());
+    if (!ps::identityRead(failure, 0x408B25, &table, sizeof(table))) return false;
+    if (table != ps::streamingTable) return ps::identityRefuse(failure, "value_mismatch", 0x408B25, sizeof(table));
+    if (!ps::identityRead(failure, ps::imageBase, headers.data(), headers.size()) ||
+        !ps::identityBytes(failure, ps::imageBase, headers.data(), executable.data(), headers.size())) return false;
     for (const auto region : ps::codeRegions) {
         const auto* original = diskBytes(region.address, region.size);
         std::array<std::byte, 0x5C0> observed{};
-        SIZE_T count = 0;
-        if (!original || region.size > observed.size() || !imagePage(region.address, region.size, true) ||
-            !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(region.address), observed.data(), region.size, &count) ||
-            count != region.size || std::memcmp(original, observed.data(), region.size)) return false;
+        if (!original) return ps::identityRefuse(failure, "disk_mapping_failed", region.address, region.size);
+        if (region.size > observed.size()) return ps::identityRefuse(failure, "buffer_capacity", region.address, region.size);
+        if (!ps::identityPage(failure, region.address, region.size, PAGE_EXECUTE_READ) ||
+            !ps::identityRead(failure, region.address, observed.data(), region.size) ||
+            !ps::identityBytes(failure, region.address, observed.data(), original, region.size)) return false;
     }
     ps::CallBytes observed{};
     const auto* disk = diskBytes(ps::phaseCall, observed.size());
-    return disk && !std::memcmp(disk, ps::originalCall.data(), observed.size()) &&
-        imagePage(ps::phaseCall, observed.size(), true) && read(ps::phaseCall, observed) &&
-        observed == (hookPublished.load() ? installedCall : ps::originalCall);
+    if (!disk) return ps::identityRefuse(failure, "disk_mapping_failed", ps::phaseCall, observed.size());
+    if (!ps::identityBytes(failure, ps::phaseCall, disk, ps::originalCall.data(), observed.size(), "disk_bytes_mismatch") ||
+        !ps::identityPage(failure, ps::phaseCall, observed.size(), PAGE_EXECUTE_READ) ||
+        !ps::identityRead(failure, ps::phaseCall, observed.data(), observed.size())) return false;
+    // The installed five bytes are intentionally NOT compared with the disk CALL.
+    return ps::identityPublishedBytes(failure, ps::phaseCall, observed.data(), ps::originalCall.data(),
+        installedCall.data(), observed.size(), hookPublished.load());
 }
 bool admitExecutable() {
     wchar_t path[32768]{};
@@ -139,7 +182,9 @@ bool admitExecutable() {
     const DWORD ownLength = GetModuleFileNameW(module, ownPath, 32768);
     if (!ownLength || ownLength >= 32768 || std::filesystem::canonical(ownPath) !=
         std::filesystem::path(
-#if defined(GRANDMP_REMOTE_PED_MOVE_VARIANT)
+#if defined(GRANDMP_CPLAYER_VARIANT)
+            L"D:/Jogos/GrandMP-Smoke/scripts/GrandMPNativePlayerExperimental.asi"
+#elif defined(GRANDMP_REMOTE_PED_MOVE_VARIANT)
             L"D:/Jogos/GrandMP-Smoke/scripts/GrandMPRemotePedMoveExperimental.asi"
 #elif defined(GRANDMP_REMOTE_PED_VARIANT)
             L"D:/Jogos/GrandMP-Smoke/scripts/GrandMPRemotePedExperimental.asi"
@@ -216,6 +261,26 @@ bool streamingReady() noexcept {
         read(ps::loadingScene, scene) && !scene && read(ps::loadingBigModel, bigModel) && !bigModel;
 }
 
+#if !defined(GRANDMP_CPLAYER_VARIANT)
+// Shared by assignment and the CLOSED diagnostic provider; no new code ranges.
+bool taskCodeMatches() noexcept {
+    for (const auto region : ps::movement_native::regions) {
+        const auto* disk = diskBytes(region.address, region.size);
+        std::array<std::byte, 0x450> observed{};
+        SIZE_T count = 0;
+        if (!disk || region.size > observed.size() || !imagePage(region.address, region.size, region.code) ||
+            !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(region.address), observed.data(), region.size, &count) ||
+            count != region.size || std::memcmp(disk, observed.data(), region.size)) return false;
+    }
+    return true;
+}
+
+#endif
+
+bool phaseThreadMatches(std::uintptr_t caller) noexcept {
+    return gameThread && GetCurrentThreadId() == gameThread && caller == ps::phaseCall + 5;
+}
+
 struct SpawnProbe {
     void* cj = nullptr;
     template<class... Args> void trace(const char* format, Args... args) { writeSpawnLog(format, args...); }
@@ -233,6 +298,7 @@ struct SpawnProbe {
     }
 };
 
+#if !defined(GRANDMP_CPLAYER_VARIANT)
 struct NativeEngine {
     void* owned = nullptr; // Stable storage registered with the engine reference system.
     std::uintptr_t creationResult = 0; // Keep the exact AddPed result even if its registered reference is cleared.
@@ -378,18 +444,11 @@ struct NativeEngine {
         // The existing executable identity/CALL gates remain intact. Add read-only
         // comparisons for new task code and its vtable before any allocation.
         if (!codeMatches()) return "live_code_changed";
-        for (const auto region : mn::regions) {
-            const auto* disk = diskBytes(region.address, region.size);
-            std::array<std::byte, 0x450> observed{};
-            SIZE_T count = 0;
-            if (!disk || region.size > observed.size() || !imagePage(region.address, region.size, region.code) ||
-                !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(region.address), observed.data(), region.size, &count) ||
-                count != region.size || std::memcmp(disk, observed.data(), region.size)) return "task_code_or_vtable_changed";
-        }
+        if (!taskCodeMatches()) return "task_code_or_vtable_changed";
         std::uintptr_t intelligence = 0, intelligencePed = 0, managerPed = 0;
-        if (!read(ped + 0x47C, intelligence) || !intelligence || !read(intelligence, intelligencePed) || intelligencePed != ped ||
-            !read(intelligence + 4 + 0x2C, managerPed) || managerPed != ped) return "intelligence_manager_owner_mismatch";
-        const auto manager = intelligence + 4;
+        if (!read(ped + ps::task_layout::intelligence, intelligence) || !intelligence || !read(intelligence, intelligencePed) || intelligencePed != ped ||
+            !read(intelligence + ps::task_layout::manager + ps::task_layout::managerOwner, managerPed) || managerPed != ped) return "intelligence_manager_owner_mismatch";
+        const auto manager = intelligence + ps::task_layout::manager;
         // Never replace a primary task or override physical/event responses.
         for (unsigned i = 0; i <= mn::primarySlot; ++i) {
             std::uintptr_t task = 0;
@@ -437,19 +496,39 @@ struct NativeEngine {
     }
 } engine;
 
+#endif // Legacy civil experiment
+#if defined(GRANDMP_CPLAYER_VARIANT)
+#include "native_player_runtime.inl"
+#endif
+
 #if defined(GRANDMP_REMOTE_PED_VARIANT)
 #include "remote_ped_runtime.inl"
+#endif
+
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+#include "native_diagnostic_windows_runtime.inl"
+#include "native_diagnostic_live.inl"
 #endif
 
 void runPhase(std::uintptr_t caller) noexcept {
     if (callbacks.fetch_add(1, std::memory_order_relaxed) == 0) writeLog("waiting", "callback_executed");
     if (preparation.load() != 3) return; // Do not spawn while publication/protection checks are still in progress.
-    const bool correctThread = gameThread && GetCurrentThreadId() == gameThread;
-    if (!correctThread || caller != ps::phaseCall + 5) {
+    if (!phaseThreadMatches(caller)) {
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+        stopTaskDiagnostic();
+#endif
         runtimeDisabled.store(true); writeLog("failed", "wrong_phase_caller_or_thread"); return;
     }
     if (runtimeDisabled.load()) {
-#if defined(GRANDMP_REMOTE_PED_VARIANT)
+#if defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) && GRANDMP_NATIVE_INPUT_REPLAY_BUILD == 1
+        inputReport(); // Deferred until the existing admitted phase; never in the control wrapper.
+#endif
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+        stopTaskDiagnostic();
+#endif
+#if defined(GRANDMP_CPLAYER_VARIANT)
+        nativeFinished=true;
+#elif defined(GRANDMP_REMOTE_PED_VARIANT)
         remoteController.disable();
 #else
         experiment.fail();
@@ -457,13 +536,34 @@ void runPhase(std::uintptr_t caller) noexcept {
         return;
     }
     // Also guard validation/native queries against any nested engine dispatch.
-    static bool busy = false;
-    if (busy) return;
-    busy = true;
-    struct Leave { bool& value; ~Leave() { value = false; } } leave{busy};
+    if (phaseDispatchActive) return;
+    phaseDispatchActive = true;
+    struct Leave { bool& value; ~Leave() { value = false; } } leave{phaseDispatchActive};
+#if defined(GRANDMP_CPLAYER_VARIANT)
+    ps::CodeIdentityFailure commonFailure{}, factoryFailure{};
+    const bool commonMatches = codeMatches(&commonFailure);
+    const bool factoryMatches = factoryCodeMatches(&factoryFailure); // Evaluate independently, even if common failed.
+    if (!commonMatches || !factoryMatches) {
+        runtimeDisabled.store(true); // Close dispatch BEFORE emitting the one terminal diagnostic.
+        writeLog("failed", commonMatches ? "codeMatches=pass factoryCodeMatches=fail" :
+            factoryMatches ? "codeMatches=fail factoryCodeMatches=pass" : "codeMatches=fail factoryCodeMatches=fail");
+        const auto report = [](const ps::CodeIdentityFailure& failure) {
+            char detail[320]{}; // Final writeLog line remains within its 512-byte buffer.
+            if (ps::formatCodeIdentityFailure(detail, sizeof(detail), failure)) writeLog("failed", detail);
+            else writeLog("failed", "identity_diagnostic_format_failed");
+        };
+        if (!commonMatches) report(commonFailure);
+        if (!factoryMatches) report(factoryFailure);
+        writeLog("failed", "native_player_code_identity_terminal_no_cleanup");
+        return; // No factory/engine operation, cleanup, retry or subsequent frame logging.
+    }
+#endif
 #if defined(GRANDMP_REMOTE_PED_VARIANT)
     // Fail permanently even outside gameplay; never clean up unknown identity.
     if (!codeMatches()) {
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+        stopTaskDiagnostic();
+#endif
         runtimeDisabled.store(true);
         remoteController.disable();
 #if defined(GRANDMP_REMOTE_PED_MOVE_VARIANT)
@@ -475,9 +575,18 @@ void runPhase(std::uintptr_t caller) noexcept {
 #endif
     void* cj = nullptr;
     const bool gameplay = playerReady(cj) && streamingReady();
-#if defined(GRANDMP_REMOTE_PED_VARIANT)
+#if defined(GRANDMP_CPLAYER_VARIANT)
+    nativeTick(gameplay);
+#elif defined(GRANDMP_REMOTE_PED_VARIANT)
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+    TaskDiagnosticFrame diagnostic(caller,callbacks.load(std::memory_order_relaxed));
+    if (rp::physicalExecutionApproved && remoteReceiver.load() == rp::ReceiverState::ready)
+        remoteController.tick(remoteEngine, remoteIntents.snapshot(), true, gameplay, GetTickCount64(), diagnostic);
+    diagnostic.afterTick(remoteController); // Also after arrived, when Controller no longer advances Movement.
+#else
     if (rp::physicalExecutionApproved && remoteReceiver.load() == rp::ReceiverState::ready)
         remoteController.tick(remoteEngine, remoteIntents.snapshot(), true, gameplay, GetTickCount64());
+#endif
 #else
     if (gameplay && !codeMatches()) { experiment.fail(); writeLog("failed", "live_code_changed"); return; }
     DWORD foregroundPid = 0;
@@ -502,67 +611,162 @@ DWORD engineWindowThread() noexcept {
     return pid == GetCurrentProcessId() ? thread : 0;
 }
 
-bool installCandidate() {
+void storeCandidateOutcome(const ps::InstallOutcome& outcome) noexcept {
+    installCandidateFailure.store(static_cast<std::uint32_t>(outcome.primary.failure));
+    installCandidateError.store(outcome.primary.win32Error);
+    installCandidateHasError.store(outcome.primary.hasWin32Error);
+    installCandidateCleanupFailure.store(static_cast<std::uint32_t>(outcome.candidateCleanup.failure));
+    installCandidateCleanupError.store(outcome.candidateCleanup.win32Error);
+    installCandidateCleanupHasError.store(outcome.candidateCleanup.hasWin32Error);
+}
+
+ps::InstallOutcome loadCandidateOutcome() noexcept {
+    ps::InstallOutcome outcome{};
+    outcome.primary.failure = static_cast<ps::InstallFailure>(installCandidateFailure.load());
+    outcome.primary.win32Error = installCandidateError.load();
+    outcome.primary.hasWin32Error = installCandidateHasError.load();
+    outcome.candidateCleanup.failure = static_cast<ps::InstallFailure>(installCandidateCleanupFailure.load());
+    outcome.candidateCleanup.win32Error = installCandidateCleanupError.load();
+    outcome.candidateCleanup.hasWin32Error = installCandidateCleanupHasError.load();
+    return outcome;
+}
+
+void logInstallDiagnostic(const ps::InstallDiagnostic& diagnostic) noexcept {
+    if (diagnostic.failure == ps::InstallFailure::none) return;
+    char reason[128]{};
+    if (ps::formatInstallDiagnostic(reason, sizeof(reason), diagnostic)) writeLog("failed", reason);
+    else writeLog("failed", "install_diagnostic_format_failed");
+}
+
+ps::InstallOutcome installCandidate() {
+    const auto fail = [](ps::InstallFailure failure) {
+        ps::InstallOutcome result{};
+        result.primary.failure = failure;
+        return result;
+    };
+    const auto win32Fail = [](ps::InstallFailure failure, DWORD error) {
+        ps::InstallOutcome result{};
+        result.primary = {failure, error, true};
+        return result;
+    };
     // The reviewed build cannot enter a writer. No opt-in overrides this gate.
-    if (!ps::physicalExecutionApproved) return false;
+    if (!ps::physicalExecutionApproved) return fail(ps::InstallFailure::candidate_physical_gate_closed);
     void* cj = nullptr;
     // A five-byte CALL is not atomic. Install only on the engine/window thread
     // while it is in GetMessage/PeekMessage, never from the preparation worker.
     int cpu[4]{};
     __cpuid(cpu, 1);
-    if (!gameThread || engineWindowThread() != gameThread || GetCurrentThreadId() != gameThread || !(cpu[3] & (1 << 24)) ||
-        !IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE) || !playerReady(cj) || !streamingReady() ||
-        !codeMatches() || !ps::encodePhaseCall(reinterpret_cast<std::uintptr_t>(&ps::phaseThunk), installedCall)) return false;
+    if (!gameThread) return fail(ps::InstallFailure::candidate_game_thread_unavailable);
+    if (engineWindowThread() != gameThread) return fail(ps::InstallFailure::candidate_window_thread_mismatch);
+    if (GetCurrentThreadId() != gameThread) return fail(ps::InstallFailure::candidate_wrong_thread);
+    if (!(cpu[3] & (1 << 24))) return fail(ps::InstallFailure::candidate_cpu_fxsr_unavailable);
+    if (!IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE)) return fail(ps::InstallFailure::candidate_sse2_unavailable);
+    if (!playerReady(cj)) return fail(ps::InstallFailure::candidate_player_not_ready);
+    if (!streamingReady()) return fail(ps::InstallFailure::candidate_streaming_not_ready);
+    if (!codeMatches()) return fail(ps::InstallFailure::candidate_code_identity_mismatch);
+    if (!ps::encodePhaseCall(reinterpret_cast<std::uintptr_t>(&ps::phaseThunk), installedCall))
+        return fail(ps::InstallFailure::candidate_call_encoding_failed);
     DWORD protection = 0;
     auto* entry = reinterpret_cast<void*>(ps::phaseCall);
-    if (!VirtualProtect(entry, installedCall.size(), PAGE_EXECUTE_READWRITE, &protection)) return false;
+    const BOOL writable = VirtualProtect(entry, installedCall.size(), PAGE_EXECUTE_READWRITE, &protection);
+    const DWORD writableError = writable ? ERROR_SUCCESS : GetLastError();
+    if (!writable) return win32Fail(ps::InstallFailure::candidate_virtual_protect_failed, writableError);
     if (protection != PAGE_EXECUTE_READ) {
         DWORD ignored = 0;
-        VirtualProtect(entry, installedCall.size(), protection, &ignored);
-        return false;
+        const BOOL restored = VirtualProtect(entry, installedCall.size(), protection, &ignored);
+        const DWORD restoreError = restored ? ERROR_SUCCESS : GetLastError();
+        auto result = fail(ps::InstallFailure::candidate_unexpected_page_protection);
+        if (!restored) result.candidateCleanup = {ps::InstallFailure::candidate_initial_protection_restore_failed, restoreError, true};
+        return result;
     }
     std::memcpy(entry, installedCall.data(), installedCall.size());
     hookPublished.store(true);
     const BOOL flushed = FlushInstructionCache(GetCurrentProcess(), entry, installedCall.size());
+    const DWORD flushError = flushed ? ERROR_SUCCESS : GetLastError();
     DWORD ignored = 0;
     const BOOL restored = VirtualProtect(entry, installedCall.size(), protection, &ignored);
-    if (!flushed || !restored || !codeMatches()) {
-        writeLog("failed", "phase_publication_failed_module_pinned_no_engine_dispatch");
-        return false; // Immutable original remains available; no unload/automatic repair.
+    const DWORD restoreError = restored ? ERROR_SUCCESS : GetLastError();
+    if (!flushed || !restored) {
+        auto result = !flushed
+            ? win32Fail(ps::InstallFailure::candidate_instruction_cache_flush_failed, flushError)
+            : win32Fail(ps::InstallFailure::candidate_protection_restore_failed, restoreError);
+        if (!restored && !flushed)
+            result.candidateCleanup = {ps::InstallFailure::candidate_protection_restore_failed, restoreError, true};
+        return result; // Immutable original remains available; no unload/automatic repair.
     }
-    return true;
+    if (!codeMatches()) return fail(ps::InstallFailure::candidate_post_publish_code_mismatch);
+    return {};
 }
 
 LRESULT CALLBACK installMessage(int code, WPARAM word, LPARAM message) {
     unsigned armed = 1;
     if (code >= 0 && installation.compare_exchange_strong(armed, 2)) {
-        installationSucceeded.store(installCandidate());
+        const auto outcome = installCandidate();
+        storeCandidateOutcome(outcome);
+#if defined(GRANDMP_CPLAYER_VARIANT)
+        if (outcome.succeeded() && !prepareNativeBinding()) runtimeDisabled.store(true);
+#endif
         installation.store(3);
     }
     return CallNextHookEx(nullptr, code, word, message);
 }
 
-bool installOnGameThread() {
-    if (!ps::physicalExecutionApproved || !gameThread) return false;
+ps::InstallOutcome installOnGameThread() {
+    ps::InstallOutcome outcome{};
+    if (!ps::physicalExecutionApproved) {
+        outcome.primary.failure = ps::InstallFailure::candidate_physical_gate_closed;
+        return outcome;
+    }
+    if (!gameThread) {
+        outcome.primary.failure = ps::InstallFailure::window_thread_unavailable;
+        return outcome;
+    }
     HMODULE pinned = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-        reinterpret_cast<LPCWSTR>(&ps::phaseThunk), &pinned) || pinned != module) return false;
+    const BOOL pinSucceeded = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&ps::phaseThunk), &pinned);
+    const DWORD pinError = pinSucceeded ? ERROR_SUCCESS : GetLastError();
+    if (!pinSucceeded) {
+        outcome.primary = {ps::InstallFailure::module_pin_failed, pinError, true};
+        return outcome;
+    }
+    if (pinned != module) {
+        outcome.primary.failure = ps::InstallFailure::module_pin_mismatch;
+        return outcome;
+    }
     installation.store(1);
     // This bootstrap does no engine work. Its sole job is same-thread publication.
     const HHOOK hook = SetWindowsHookExW(WH_GETMESSAGE, installMessage, module, gameThread);
-    if (!hook) { installation.store(4); return false; }
+    const DWORD hookError = hook ? ERROR_SUCCESS : GetLastError();
+    if (!hook) {
+        installation.store(4);
+        outcome.primary = {ps::InstallFailure::set_windows_hook_failed, hookError, true};
+        return outcome;
+    }
     const bool posted = PostThreadMessageW(gameThread, WM_NULL, 0, 0) != FALSE;
+    const DWORD postError = posted ? ERROR_SUCCESS : GetLastError();
+    if (!posted) outcome.bootstrapWarning = {ps::InstallFailure::post_thread_message_failed, postError, true};
     const auto deadline = GetTickCount64() + 5000;
     while (posted && installation.load() == 1 && GetTickCount64() < deadline) Sleep(1);
     unsigned armed = 1;
     installation.compare_exchange_strong(armed, 4); // Cancel only if not yet executing.
     while (installation.load() == 2) Sleep(1); // Do not close identity storage under the installer.
-    if (!UnhookWindowsHookEx(hook)) {
+    const unsigned installationState = installation.load();
+    if (installationState == 3) outcome.primary = loadCandidateOutcome().primary;
+    else if (posted) outcome.primary.failure = ps::InstallFailure::callback_timeout_5000ms;
+    else if (outcome.primary.failure == ps::InstallFailure::none)
+        outcome.primary = outcome.bootstrapWarning;
+    const BOOL unhooked = UnhookWindowsHookEx(hook);
+    const DWORD unhookError = unhooked ? ERROR_SUCCESS : GetLastError();
+    if (!unhooked) {
         runtimeDisabled.store(true);
-        writeLog("failed", "bootstrap_unhook_failed_module_pinned");
-        return false;
+        outcome.unhookFailure = {ps::InstallFailure::unhook_failed, unhookError, true};
     }
-    return installationSucceeded.load(); // Worker opens dispatch only after bootstrap removal.
+    if (installationState == 3) {
+        const auto candidate = loadCandidateOutcome();
+        outcome.primary = candidate.primary;
+        outcome.candidateCleanup = candidate.candidateCleanup;
+    }
+    return outcome; // Worker opens dispatch only after bootstrap removal.
 }
 
 DWORD WINAPI prepare(void* reference) {
@@ -585,23 +789,46 @@ DWORD WINAPI prepare(void* reference) {
         } else {
             wchar_t enabled[4]{};
             GetEnvironmentVariableW(L"GRANDMP_PED_SMOKE_ENABLE", enabled, 4);
+            #if defined(GRANDMP_CPLAYER_VARIANT)
+            wchar_t nativeEnabled[4]{};
+            GetEnvironmentVariableW(L"GRANDMP_NATIVE_PLAYER_ENABLE",nativeEnabled,4);
+            if (std::wstring_view(nativeEnabled)!=L"1") enabled[0]=0;
+#endif
             if (std::wstring_view(enabled) != L"1") {
                 writeLog("waiting", "explicit_opt_in_missing");
                 preparation.store(2);
             } else {
                 writeLog("waiting", "press_F6_in_gameplay_to_install_candidate");
                 const auto deadline = GetTickCount64() + 120000;
-                bool installed = false;
+                bool f6Detected = false;
+                ps::InstallOutcome installOutcome{};
                 while (GetTickCount64() < deadline) {
                     DWORD pid = 0;
                     GetWindowThreadProcessId(GetForegroundWindow(), &pid);
                     if (pid == GetCurrentProcessId() && (GetAsyncKeyState(VK_F6) & 0x8000)) {
+                        f6Detected = true;
+                        writeLog("waiting", "installation_f6_detected_attempt_started");
                         gameThread = engineWindowThread();
-                        installed = installOnGameThread();
+                        installOutcome = installOnGameThread();
                         break;
                     }
                     Sleep(50);
                 }
+                if (!f6Detected) installOutcome.primary = ps::f6WaitResult(false);
+                logInstallDiagnostic(installOutcome.primary);
+                if (installOutcome.bootstrapWarning.failure != ps::InstallFailure::none &&
+                    installOutcome.bootstrapWarning.failure != installOutcome.primary.failure) {
+                    const auto warning = installOutcome.bootstrapWarning;
+                    char detail[128]{};
+                    if (ps::formatInstallDiagnostic(detail, sizeof(detail), warning)) writeLog("waiting", detail);
+                    else writeLog("failed", "install_diagnostic_format_failed");
+                }
+                logInstallDiagnostic(installOutcome.candidateCleanup);
+                logInstallDiagnostic(installOutcome.unhookFailure);
+                bool installed = installOutcome.succeeded();
+#if defined(GRANDMP_CPLAYER_VARIANT)
+                if (installed && (runtimeDisabled.load() || !startNativeNetwork())) { runtimeDisabled.store(true);installed=false; }
+#endif
 #if defined(GRANDMP_REMOTE_PED_VARIANT)
                 if (installed && !startRemoteNetwork()) {
                     runtimeDisabled.store(true);
@@ -609,8 +836,14 @@ DWORD WINAPI prepare(void* reference) {
                     writeLog("failed", "remote_worker_start_refused_module_pinned");
                 }
 #endif
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+                if (installed) prepareTaskDiagnostic(); // Allocate/publish BEFORE admitting callbacks, outside loader lock.
+#endif
                 preparation.store(installed ? 3 : 4);
                 writeLog(installed ? "waiting" : "failed", installed ? "post_population_phase_installed_original_immutable_module_pinned" : "installation_refused");
+#if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
+                if (installed) serviceTaskDiagnostic(); // Existing preparation worker, bounded wait, no engine calls.
+#endif
             }
         }
     } catch (...) { preparation.store(4); writeLog("failed", "preparation_exception_no_retry"); }

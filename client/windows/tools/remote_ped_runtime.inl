@@ -50,12 +50,29 @@ struct RemoteEngine final : NativeEngine {
             float ground(float x,float y,float z,bool& found) {
                 return reinterpret_cast<float(__cdecl*)(float,float,float,bool*,void**)>(ps::findGround)(x,y,z,&found,nullptr);
             }
-            std::uintptr_t sphere(ps::Position center) {
+            rm::SphereProbeResult sphere(ps::Position center) {
                 using Sphere=void*(__cdecl*)(ps::Position,float,void*,bool,bool,bool,bool,bool,bool);
-                return reinterpret_cast<std::uintptr_t>(reinterpret_cast<Sphere>(ps::testSphere)(center,0.35f,ignore,true,true,true,true,true,false));
+                // Keep the returned pointer local and classify it by equality only. Never dereference or publish it.
+                const void* hit = reinterpret_cast<Sphere>(ps::testSphere)(center,rm::corridorProbeRadius,ignore,true,true,true,true,true,false);
+                // Resolve/validate CJ only after this existing query reports a hit. On no-hit paths,
+                // playerReady remains after the complete corridor, as in the pre-FU6 guard order.
+                return rm::classifySphereResult(hit, [] {
+                    return rm::captureCjIdentity([](void*& cj) { return playerReady(cj); });
+                });
             }
         } probe{owned};
-        if (const char* reason=rm::findDestination(probe,origin,remoteDestination,destination)) return reason;
+        rm::CorridorCollisionDiagnostic collision{};
+        if (const char* reason=rm::findDestination(probe,origin,remoteDestination,destination,&collision)) {
+            if (!std::strcmp(reason,"corridor_sphere_hit")) {
+                char detail[rm::collisionDiagnosticCapacity]{};
+                if (rm::formatCollisionDiagnostic(detail,sizeof(detail),key.generation,received.sequence,collision))
+                    moveLog("remote_move_collision_diagnostic",detail);
+                else
+                    moveLog("remote_move_collision_diagnostic","collision_diagnostic_format_truncated");
+            }
+            return reason;
+        }
+        // This remains the original post-corridor playerReady check on the successful path.
         void* cj=nullptr; ps::Position playerPosition{};
         if (!playerReady(cj,&playerPosition) || ps::distance2D(destination,playerPosition)>12.f || std::abs(destination.z-playerPosition.z)>3.f)
             return "destination_cj_proximity_limit";
@@ -64,6 +81,12 @@ struct RemoteEngine final : NativeEngine {
     void moveLog(const char* state, const char* reason) {
         char event[64]{}, detail[208]{};
         if (std::strncmp(state,"remote_",7)) { std::snprintf(event,sizeof(event),"remote_%s",state); state=event; }
+        if (!std::strcmp(state,"remote_move_collision_diagnostic")) {
+            // The formatted detail already includes generation and sequence.
+            // The engine result is represented only as null/non-null, never as a raw address.
+            writeLog(state,reason); // The diagnostic line deliberately carries no PED address.
+            return;
+        }
         char facts[112]{};
         if (!std::strcmp(state,"remote_move_anchor_set")) {
             std::snprintf(facts,sizeof(facts),"remote=(%.2f,%.2f,%.2f) local=(%.2f,%.2f,%.2f)",

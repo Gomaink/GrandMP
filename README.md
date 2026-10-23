@@ -15,7 +15,7 @@
 
 ## About
 
-GrandMP is an independent experiment in integrating networked player state with the original **GTA: San Andreas** engine. The project investigates native entity lifecycle, task-based pedestrian movement, network observation and strict engine-thread boundaries.
+GrandMP is an independent multiplayer project for the original **GTA: San Andreas**. Its current Windows prototype receives remote input over UDP and replays it through the game's native player processing. A portable C++20 core separates networking and player state from platform-specific engine integration.
 
 The goal is a maintainable foundation for multiplayer features. GrandMP is **not** a decompilation of GTA: San Andreas and does not include the game, proprietary assets, or a modified executable.
 
@@ -27,34 +27,31 @@ The goal is a maintainable foundation for multiplayer features. GrandMP is **not
 | Native PED creation and removal | Physically validated (Alpha 0.4) |
 | Native walking task for a locally controlled PED | Physically validated (Alpha 0.5) |
 | UDP-driven remote PED spawn and despawn | Physically validated (Alpha 0.6) |
-| Network-driven relative PED walking | Experimental (Alpha 0.7); first physical attempt stopped by a collision-corridor check before task assignment |
-| Continuous movement synchronization | Not implemented |
+| Network-driven relative PED walking | Physically validated (Alpha 0.7 FU6); retained as a separate legacy experiment |
+| Persistent second CPlayerPed with remote on-foot input | Physically validated (Alpha 0.8, October 22, 2026): walk forward, move laterally, stop, then remove on disconnect |
+| Two real GTA clients synchronizing with each other | Not validated; the remote source is currently a synthetic client |
+| Snapshot-based physical reconciliation | Not enabled |
 | General-purpose playable multiplayer | Not implemented |
 
-These statuses refer to **limited, isolated tests**, not production-ready features.
+These statuses refer to **limited, isolated tests**, not production-ready features. The Alpha 0.8 operator also confirmed successful restoration of both original ASIs. See [Current status](docs/STATUS.md), [Changelog](CHANGELOG.md) and [Roadmap](docs/ROADMAP.md).
 
 ## Architecture
 
 ```text
-Synthetic UDP client ──> UDP server (loopback in lab)
-                              │
-                              ▼
-                   Observer / remote roster
-                              │
-                              ▼
-                    Remote player scene
-                              │
-                              ▼
-                    Thread-safe intents
-                              │
-                              ▼
-                 Validated GTA main-thread phase
-                              │
-                              ▼
-                  Native PED / task lifecycle
+Synthetic input source → UDP server (loopback)
+                              ↓
+                  ObserverNetwork / roster / Scene
+                              ↓
+                    RemotePlayerController
+                              ↓
+                        Native Binding
+                              ↓
+                Native Player Factory → CPlayerPed (slot 1)
+                              ↓
+                Scoped input replay → original ProcessControl
 ```
 
-Network workers do not create or remove GTA entities. Native engine actions are restricted to a validated game-thread phase, with explicit identity, lifecycle and ownership checks. See [Architecture](docs/ARCHITECTURE.md).
+Network workers publish copied values, never GTA pointers. Creation and removal run in the admitted game-thread phase. Input replay wraps the remote player's normal `ProcessControl` dispatch, restores the borrowed pad state and leaves local CJ on the original path. Snapshots remain references for future reconciliation; this path does not write position, velocity or matrices. See [Architecture](docs/architecture.md).
 
 ## Building from source
 
@@ -65,16 +62,16 @@ Network workers do not create or remove GTA entities. Native engine actions are 
 - CMake and Python for relevant development tests
 - A legitimate, independently installed copy of GTA: San Andreas is **not required to compile the core tests**; native experiments require a separately owned compatible game installation
 
-Example development build (experimental physical gates remain off):
+Example closed development build (no GTA installation required; physical gates remain off in a fresh directory):
 
 ```powershell
-cmake -S . -B build/dev-win32 -G "Visual Studio 18 2026" -A Win32 -DBUILD_TESTING=ON
-cmake --build build/dev-win32 --config Debug --target grandmp_server grandmp_synthetic_client grandmp_remote_ped_move_experimental
-ctest --test-dir build/dev-win32 -C Debug --output-on-failure -j 1
+cmake -S . -B build/dev-win32 -G "Visual Studio 18 2026" -A Win32 -DBUILD_TESTING=ON -DGRANDMP_BUILD_REMOTE_PLAYER_CONTROLLER_HOST=ON
+cmake --build build/dev-win32 --config Debug --target grandmp_server grandmp_synthetic_client grandmp_remote_player_controller_host grandmp_remote_player_controller_tests grandmp_remote_player_binding_tests grandmp_native_second_player_tests grandmp_native_player_replay_tests grandmp_native_player_replay_compile grandmp_native_player_identity_compile
+ctest --test-dir build/dev-win32 -C Debug --output-on-failure -j 1 -R "^(remote_player_controller_|remote_player_binding_|native_second_player_|native_player_replay_)"
 ```
 
 > [!NOTE]
-> Some tests and optional targets depend on configuration and development fixtures. Consult CMake target definitions and the test output; the command above is a starting point, not a guarantee of identical results on every machine.
+> This selects pipeline, binding, lifecycle and replay regressions, including disposable hosts and a real loopback UDP test with a non-GTA backend. It does not run the entire repository suite or demonstrate gameplay. Python is required for the process-level loopback tests. See [Build instructions](docs/BUILDING.md) for target and gate details.
 
 Do not co-install multiple experimental ASIs: several historical experiments target the same native call site. Debug binaries may require the MSVC Debug runtime.
 
@@ -82,7 +79,9 @@ Do not co-install multiple experimental ASIs: several historical experiments tar
 
 | Path | Purpose |
 | --- | --- |
-| `client/` | Windows integration and experimental client runtime |
+| `shared/` | Portable C++20 protocol, player state, controller and Scene |
+| `client/windows/` | Windows native integration and experimental client runtime |
+| `client/android/` | Reserved Android adapter; no functional native client yet |
 | `server/` | UDP server implementation |
 | `tests/` | Unit, regression, build-gate and loopback tests |
 | `docs/` | Technical documentation and design notes |
@@ -95,9 +94,14 @@ Generated files in `build/`, diagnostic logs, dumps, local backups and GTA files
 - [x] Guarded native execution and one-PED lifecycle
 - [x] Task-based walking validated locally
 - [x] One remote PED spawned and removed via UDP
-- [ ] Diagnose Alpha 0.7 corridor collision rejection and validate one network-driven walk physically
-- [ ] Continuous remote movement and interpolation
-- [ ] Multi-player entity management, broader compatibility and hardening
+- [x] One network-driven native walk (Alpha 0.7 FU6)
+- [x] Persistent remote CPlayerPed with native input replay (Alpha 0.8)
+- [ ] Capture real player controls and validate two GTA clients together
+- [ ] Reconcile remote snapshots without unsafe pose or velocity writes
+- [ ] Multiple remotes, gameplay authority, vehicles and combat
+- [ ] Pawn, modding and a separately authenticated Android adapter
+
+The native experiment supports one additional player in the original cooperative slot. It is not a general slot-expansion or full multiplayer implementation. See the [Roadmap](docs/ROADMAP.md) for remaining acceptance criteria.
 
 ## Contributing
 

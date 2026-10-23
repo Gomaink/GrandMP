@@ -51,6 +51,16 @@ std::uint64_t readU64(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return value;
 }
 
+void appendOnFoot(std::vector<std::uint8_t>& bytes, const core::OnFootState& s) {
+    for (float v : {s.x,s.y,s.z,s.vx,s.vy,s.vz,s.heading,s.viewHeading,s.controls.right,s.controls.forward})
+        appendU32(bytes,std::bit_cast<std::uint32_t>(v));
+    appendU16(bytes,s.controls.buttons);
+}
+core::OnFootState readOnFoot(std::span<const std::uint8_t> b, std::size_t at) {
+    const auto f=[&](unsigned n) { return std::bit_cast<float>(readU32(b,at+4*n)); };
+    return {f(0),f(1),f(2),f(3),f(4),f(5),f(6),f(7),{f(8),f(9),readU16(b,at+40)}};
+}
+
 }  // namespace
 
 bool validCoordinates(float x, float y, float z) noexcept {
@@ -111,9 +121,22 @@ std::optional<std::vector<std::uint8_t>> encode(const Message& message) {
             appendU32(bytes, std::bit_cast<std::uint32_t>(value.x));
             appendU32(bytes, std::bit_cast<std::uint32_t>(value.y));
             appendU32(bytes, std::bit_cast<std::uint32_t>(value.z));
-        } else if constexpr (std::is_same_v<T, SnapshotRequest>) {
+        } else if constexpr (std::is_same_v<T, PlayerOnFoot> || std::is_same_v<T, RemoteOnFoot>) {
+            if (!value.sequence || !core::validOnFoot(value.state)) return false;
+            if constexpr (std::is_same_v<T, PlayerOnFoot>) {
+                if (!value.session_id) return false;
+                bytes.push_back(static_cast<std::uint8_t>(MessageType::player_on_foot));
+                appendU16(bytes,54); appendU64(bytes,value.session_id);
+            } else {
+                if (!value.recipient_session || !value.player_id || value.recipient_session==value.player_id) return false;
+                bytes.push_back(static_cast<std::uint8_t>(MessageType::remote_on_foot));
+                appendU16(bytes,62); appendU64(bytes,value.recipient_session); appendU64(bytes,value.player_id);
+            }
+            appendU32(bytes,value.sequence); appendOnFoot(bytes,value.state);
+        } else if constexpr (std::is_same_v<T, SnapshotRequest> || std::is_same_v<T, OnFootSubscribe>) {
             if (value.session_id == 0) return false;
-            bytes.push_back(static_cast<std::uint8_t>(MessageType::snapshot_request));
+            bytes.push_back(static_cast<std::uint8_t>(std::is_same_v<T, SnapshotRequest>
+                ? MessageType::snapshot_request : MessageType::on_foot_subscribe));
             appendU16(bytes, 8);
             appendU64(bytes, value.session_id);
         }
@@ -144,6 +167,9 @@ DecodeResult decode(std::span<const std::uint8_t> bytes) noexcept {
         case MessageType::remote_position: expected_payload = 24; break;
         case MessageType::remote_leave: expected_payload = 8; break;
         case MessageType::snapshot_request: expected_payload = 8; break;
+        case MessageType::player_on_foot: expected_payload = 54; break;
+        case MessageType::remote_on_foot: expected_payload = 62; break;
+        case MessageType::on_foot_subscribe: expected_payload = 8; break;
         default: return {DecodeStatus::invalid_type, std::nullopt};
     }
     if (readU16(bytes, 6) != expected_payload || bytes.size() != kHeaderSize + expected_payload) {
@@ -198,9 +224,23 @@ DecodeResult decode(std::span<const std::uint8_t> bytes) noexcept {
                 return {DecodeStatus::invalid_field, std::nullopt};
             return {DecodeStatus::ok, Message{value}};
         }
-        case MessageType::snapshot_request: {
+        case MessageType::player_on_foot: {
+            const PlayerOnFoot value{readU64(bytes,8),readU32(bytes,16),readOnFoot(bytes,20)};
+            if (!value.session_id || !value.sequence || !core::validOnFoot(value.state))
+                return {DecodeStatus::invalid_field,std::nullopt};
+            return {DecodeStatus::ok,Message{value}};
+        }
+        case MessageType::remote_on_foot: {
+            const RemoteOnFoot value{readU64(bytes,8),readU64(bytes,16),readU32(bytes,24),readOnFoot(bytes,28)};
+            if (!value.recipient_session || !value.player_id || value.recipient_session==value.player_id ||
+                !value.sequence || !core::validOnFoot(value.state)) return {DecodeStatus::invalid_field,std::nullopt};
+            return {DecodeStatus::ok,Message{value}};
+        }
+        case MessageType::snapshot_request:
+        case MessageType::on_foot_subscribe: {
             const auto id = readU64(bytes, 8);
             if (id == 0) return {DecodeStatus::invalid_field, std::nullopt};
+            if (type==MessageType::on_foot_subscribe) return {DecodeStatus::ok,Message{OnFootSubscribe{id}}};
             return {DecodeStatus::ok, Message{SnapshotRequest{id}}};
         }
         default: return {DecodeStatus::invalid_type, std::nullopt};

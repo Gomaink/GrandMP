@@ -1,26 +1,47 @@
-# GrandMP architecture (experimental)
+# GrandMP architecture
 
-## Overview
+Current milestone: **Alpha 0.8**, October 22, 2026. This describes the implemented path, not a production multiplayer guarantee.
 
-GrandMP is a C++ project exploring networked entity state in GTA: San Andreas. The Windows native module is constrained to a compatible, explicitly verified executable and a carefully selected engine callback.
+## Portable state and transport
 
-## Networking
+The C++20 core in `shared/` owns protocol messages, roster identity, the remote Scene and `RemotePlayerController`. The loopback UDP server relays validated on-foot samples containing controls, position, velocity and orientation. Position-only messages remain supported. The server is not an authoritative simulation, and endpoint/session checks are not cryptographic authentication.
 
-An experimental UDP server runs on loopback during physical validation. The observer maintains remote state, rejects stale messages where supported, and passes remote-scene events to an intent sink. Network workers publish **values**, not GTA entity pointers.
+```text
+Synthetic client → UDP server → ObserverNetwork → roster / RemotePlayerScene
+                                                    ↓
+                                          RemotePlayerController
+                                                    ↓ copied frames
+                                             Native Binding
+                                                    ↓
+                                          Native Player Factory
+                                                    ↓
+                                          CPlayerPed in slot 1
+                                                    ↓
+                                scoped pad replay → original ProcessControl
+```
 
-## Engine boundary
+`ObserverNetwork` runs in the experimental ASI as well as in the closed inspection host. No inter-process bridge is required for this path. The controller validates recipient session, player identity, generation, sequence and finite/bounded values. It exposes copied frames through a nonblocking read. Input expires after 500 ms and becomes neutral; session loss and roster removal invalidate the representation. Scene interpolation remains separate from replayed controls.
 
-A validated game-thread callback consumes intent snapshots. Version, caller, thread, game phase and code checks guard native access. PED lifecycle checks include strict identity and ownership, native pool metadata, and cleanup rules.
+## Windows native boundary
 
-## Movement
+The binding admits one remote player and keeps network identity separate from native slot, pool handle, registered reference and ownership. The non-destructive factory uses the original cooperative **slot 1**, verifies its availability and completes model loading, player setup, world/lifecycle initialization and the default on-foot task. It does not execute SCM bytecode or call `ClearSpaceForMissionEntity`. Slot 0 belongs to local CJ; slot expansion is not implemented.
 
-Local movement has been physically validated using a native walking task. Experimental remote movement derives a **relative** horizontal offset from the remote position stream, validates the local spawn anchor and prospective path, then attempts one native task. The first Alpha 0.7 physical attempt was rejected at the corridor collision check; network-commanded walking has **not** been physically validated.
+Creation and removal use the admitted pre-world phase at `0x53C05C`, forwarding the original `0x73A360`. These addresses are specific to the supported executable, not portable APIs. Engine access requires exact executable/code identity, thread/phase checks, valid pool/reference ownership, module residency and explicit experimental admission. Network workers never call the GTA engine.
 
-## Safety and limitations
+Input is consumed around the remote entity's **normal** `CPlayerPed::ProcessControl` dispatch. The wrapper forwards the original at most once per admitted invocation; it does not schedule an extra control tick from the pre-world callback. Local and unrelated entities retain their original dispatch. The remote scope saves, applies and restores pad 1 state, including failure paths. Pad 0, player focus and camera state are not written by replay; relevant local context is checked for consistency. Movement is limited to the authenticated unarmed on-foot context.
 
-- Only one remote PED is supported in the current experimental workflow.
-- Compatibility is currently restricted to a specific GTA: SA 1.0 US Hoodlum executable in isolated tests.
-- The UDP v1 experimental protocol lacks a full receiver epoch and is **not** a production-authenticated multiplayer protocol.
-- Native ASI variants sharing a call site must never be installed together.
-- Default physical build gates remain disabled.
-- Simulated tests and static analysis are not evidence of successful gameplay execution.
+The game performs locomotion, animation and physics. Network position, velocity and heading are reconciliation references, not native write commands. There is no per-packet `SetPosn`, `SetMatrix`, velocity write or sequence of GoToPoint tasks in the player replay path. See the [native input contract](native-player-input.md) for dispatch and restoration boundaries.
+
+## Lifecycle and failure policy
+
+The same remote identity/generation remains bound while snapshots continue, including neutral input after stopping. Leave requests removal of that owned entity on the game thread. Unknown ownership, partial construction or identity failure is terminal and must not trigger speculative deletion or automatic recreation. Removal is correlated with the owned native record and verified cleanup; a populated player slot alone is not proof of successful construction.
+
+Physical targets are separate, `EXCLUDE_FROM_ALL` and disabled by default. Environment variables alone cannot enable them. Experimental variants sharing native dispatch sites must never be co-installed. Module residency is intentional; shutdown and file restoration require the game to be closed, not a hot unload.
+
+## Legacy and closed research
+
+Civil PED spawn, GoToPoint walking and one-walk remote experiments remain isolated for regression and diagnosis. The portable continuous-task coordinator, reassignment guards and pose-presentation model are closed research components. Their fake-backend results do not establish safe native task replacement or an authenticated physical `applyPose` backend. They are not the main remote-player architecture.
+
+## Platform scope
+
+The Windows adapter is limited to the exact admitted GTA SA 1.0 US Hoodlum executable. No compatibility is inferred for Compact, other PC revisions or Android. Windows and Android share portable domain/wire contracts; Android requires its own native adapter and device validation. See [status](STATUS.md), [build instructions](BUILDING.md) and [roadmap](ROADMAP.md).

@@ -4,6 +4,62 @@ add_library(grandmp_windows_detection STATIC
     src/module_residency.cpp
     src/player_position_diagnostics.cpp
 )
+
+# Own remote CPlayerPed registry/context scope, CLOSED static library only.
+# No ASI links this target; exposing it does not authenticate a native backend.
+option(GRANDMP_BUILD_NATIVE_REMOTE_PLAYER_BINDING "Expose the closed Win32 CPlayerPed binding library (no ASI)" OFF)
+if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND GRANDMP_BUILD_NATIVE_REMOTE_PLAYER_BINDING)
+    add_library(grandmp_native_remote_player_binding STATIC EXCLUDE_FROM_ALL
+        src/remote_player_binding.cpp src/remote_player_hoodlum.cpp)
+    target_compile_features(grandmp_native_remote_player_binding PUBLIC cxx_std_20)
+    target_compile_options(grandmp_native_remote_player_binding PRIVATE /W4 /WX /EHsc)
+    target_include_directories(grandmp_native_remote_player_binding PUBLIC include)
+    target_link_libraries(grandmp_native_remote_player_binding PUBLIC GrandMP::Shared grandmp_windows_detection bcrypt)
+    # Intentionally NO GRANDMP_NATIVE_REMOTE_PLAYER_BINDING_BUILD=1. Even this
+    # opt-in library keeps the default Binding<> closed. Tests use explicit fakes.
+endif()
+
+# Own ProcessControl slot wrapper; factory/lifecycle stay in the existing host.
+# Exposed separately so the homologated factory target never gains input replay.
+option(GRANDMP_BUILD_NATIVE_PLAYER_INPUT_EXPERIMENTAL "Expose isolated Hoodlum on-foot input ASI" OFF)
+if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND GRANDMP_BUILD_NATIVE_PLAYER_INPUT_EXPERIMENTAL)
+    add_library(grandmp_native_player_input_experimental MODULE EXCLUDE_FROM_ALL
+        tools/ped_smoke.cpp tools/NativePlayerExperimental.def
+        src/native_second_player.cpp src/remote_player_binding.cpp src/observer_network.cpp)
+    target_compile_features(grandmp_native_player_input_experimental PRIVATE cxx_std_20)
+    target_include_directories(grandmp_native_player_input_experimental PRIVATE include)
+    target_compile_options(grandmp_native_player_input_experimental PRIVATE /JMC- /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_native_player_input_experimental PRIVATE
+        GRANDMP_CPLAYER_VARIANT=1 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=1
+        GRANDMP_PED_SMOKE_PHYSICAL_BUILD=1 GRANDMP_NATIVE_INPUT_REPLAY_BUILD=1)
+    target_link_libraries(grandmp_native_player_input_experimental PRIVATE GrandMP::Shared grandmp_windows_detection bcrypt user32 ws2_32)
+    target_link_options(grandmp_native_player_input_experimental PRIVATE /INCREMENTAL:NO
+        "/MAP:${CMAKE_CURRENT_BINARY_DIR}/native-player-input/$<CONFIG>/GrandMPNativePlayerExperimental.map")
+    set_target_properties(grandmp_native_player_input_experimental PROPERTIES PREFIX "" SUFFIX ".asi"
+        OUTPUT_NAME "GrandMPNativePlayerExperimental"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-player-input"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-player-input")
+endif()
+
+# Slot-1-only candidate. This option exposes a CLOSED static library, never an ASI.
+option(GRANDMP_BUILD_NATIVE_SECOND_PLAYER_SLOT "Expose closed Hoodlum second-player lifecycle candidate" OFF)
+if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND GRANDMP_BUILD_NATIVE_SECOND_PLAYER_SLOT)
+    add_library(grandmp_native_second_player_slot STATIC EXCLUDE_FROM_ALL src/native_second_player.cpp)
+    target_compile_features(grandmp_native_second_player_slot PUBLIC cxx_std_20)
+    target_compile_options(grandmp_native_second_player_slot PRIVATE /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_native_second_player_slot PRIVATE GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0)
+    target_include_directories(grandmp_native_second_player_slot PUBLIC include)
+    target_link_libraries(grandmp_native_second_player_slot PUBLIC GrandMP::Shared)
+endif()
+
+# OFF by default. An executable pipeline inspector, never a physical ASI binding.
+option(GRANDMP_BUILD_REMOTE_PLAYER_CONTROLLER_HOST "Expose the isolated CPlayerPed input pipeline host (NO native execution)" OFF)
+if(GRANDMP_BUILD_REMOTE_PLAYER_CONTROLLER_HOST)
+    add_executable(grandmp_remote_player_controller_host EXCLUDE_FROM_ALL
+        tools/remote_player_controller_host.cpp src/observer_network.cpp)
+    target_include_directories(grandmp_remote_player_controller_host PRIVATE include)
+    target_link_libraries(grandmp_remote_player_controller_host PRIVATE GrandMP::Shared ws2_32 bcrypt)
+endif()
 target_compile_features(grandmp_windows_detection PUBLIC cxx_std_20)
 target_include_directories(grandmp_windows_detection PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -154,6 +210,33 @@ if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
     endif()
 endif()
 
+# Exclusive Alpha 0.8 READ-ONLY task diagnostic variant. Old targets never select
+# this define. Expose only; compilation/installation require separate review.
+if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    option(GRANDMP_BUILD_REMOTE_PED_TASK_DIAGNOSTIC_ENABLED "Expose the separately reviewed one-walk task diagnostic target" OFF)
+    option(GRANDMP_ENABLE_PASSIVE_MOVEMENT_DIAGNOSTIC "Include passive pre-world samples ONLY in the task diagnostic ASI" OFF)
+    if(GRANDMP_ENABLE_PASSIVE_MOVEMENT_DIAGNOSTIC AND NOT GRANDMP_BUILD_REMOTE_PED_TASK_DIAGNOSTIC_ENABLED)
+        message(FATAL_ERROR "Passive movement diagnostics require the exclusive task diagnostic target")
+    endif()
+    if(GRANDMP_BUILD_REMOTE_PED_TASK_DIAGNOSTIC_ENABLED)
+        add_library(grandmp_remote_ped_task_diagnostic_enabled MODULE EXCLUDE_FROM_ALL
+            tools/ped_smoke.cpp tools/remote_ped_move.def src/observer_network.cpp)
+        target_compile_features(grandmp_remote_ped_task_diagnostic_enabled PRIVATE cxx_std_20)
+        target_compile_definitions(grandmp_remote_ped_task_diagnostic_enabled PRIVATE
+            GRANDMP_REMOTE_PED_VARIANT=1 GRANDMP_REMOTE_PED_MOVE_VARIANT=1 GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD=1
+            GRANDMP_PASSIVE_MOVEMENT_DIAGNOSTIC_BUILD=$<BOOL:${GRANDMP_ENABLE_PASSIVE_MOVEMENT_DIAGNOSTIC}>
+            GRANDMP_PED_SMOKE_PHYSICAL_BUILD=1 GRANDMP_REMOTE_PED_PHYSICAL_BUILD=1 GRANDMP_REMOTE_PED_MOVE_PHYSICAL_BUILD=1)
+        target_compile_options(grandmp_remote_ped_task_diagnostic_enabled PRIVATE /JMC-)
+        target_link_options(grandmp_remote_ped_task_diagnostic_enabled PRIVATE /INCREMENTAL:NO
+            "/MAP:$<TARGET_FILE_DIR:grandmp_remote_ped_task_diagnostic_enabled>/GrandMPRemotePedMoveExperimental.map")
+        target_link_libraries(grandmp_remote_ped_task_diagnostic_enabled PRIVATE grandmp_windows_detection GrandMP::Shared bcrypt user32 ws2_32)
+        set_target_properties(grandmp_remote_ped_task_diagnostic_enabled PROPERTIES PREFIX "" OUTPUT_NAME "GrandMPRemotePedMoveExperimental" SUFFIX ".asi"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/client/windows/remote-ped-task-diagnostic-enabled"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/client/windows/remote-ped-task-diagnostic-enabled"
+            ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/client/windows/remote-ped-task-diagnostic-enabled")
+    endif()
+endif()
+
 if(WIN32)
     add_library(grandmp_callback_lifetime_module MODULE
         tools/callback_dll_lifetime_module.cpp
@@ -282,4 +365,25 @@ if(WIN32 AND MSVC)
         target_link_libraries(grandmp_native_counter_transaction PRIVATE grandmp_native_counter_preflight)
         add_dependencies(grandmp_native_counter_transaction grandmp_native_counter_host grandmp_native_counter_lab)
     endif()
+endif()
+
+# Separate slot-1 native factory; no SCM, civil PED backend, replay or GoToPoint.
+option(GRANDMP_BUILD_NATIVE_PLAYER_EXPERIMENTAL "Expose isolated Hoodlum CPlayerPed factory ASI" OFF)
+if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND GRANDMP_BUILD_NATIVE_PLAYER_EXPERIMENTAL)
+    add_library(grandmp_native_player_experimental MODULE EXCLUDE_FROM_ALL
+        tools/ped_smoke.cpp tools/NativePlayerExperimental.def
+        src/native_second_player.cpp src/remote_player_binding.cpp src/observer_network.cpp)
+    target_compile_features(grandmp_native_player_experimental PRIVATE cxx_std_20)
+    target_include_directories(grandmp_native_player_experimental PRIVATE include)
+    target_compile_options(grandmp_native_player_experimental PRIVATE /JMC- /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_native_player_experimental PRIVATE
+        GRANDMP_CPLAYER_VARIANT=1 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=1
+        GRANDMP_PED_SMOKE_PHYSICAL_BUILD=1)
+    target_link_libraries(grandmp_native_player_experimental PRIVATE GrandMP::Shared grandmp_windows_detection bcrypt user32 ws2_32)
+    target_link_options(grandmp_native_player_experimental PRIVATE /INCREMENTAL:NO
+        "/MAP:${CMAKE_CURRENT_BINARY_DIR}/native-player/$<CONFIG>/GrandMPNativePlayerExperimental.map")
+    set_target_properties(grandmp_native_player_experimental PROPERTIES PREFIX "" SUFFIX ".asi"
+        OUTPUT_NAME "GrandMPNativePlayerExperimental"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-player"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-player")
 endif()

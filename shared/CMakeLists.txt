@@ -4,6 +4,7 @@ add_library(grandmp_shared STATIC
     src/remote_roster.cpp
     src/remote_player_scene.cpp
     src/remote_player_adapter.cpp
+    src/remote_player_controller.cpp
     src/version.cpp
 )
 

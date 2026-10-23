@@ -31,6 +31,8 @@ enum class EventKind {
     rejected_rate,
     rejected_capacity,
     ignored,
+    on_foot_accepted,
+    on_foot_subscribed,
 };
 
 struct Event {
@@ -39,12 +41,15 @@ struct Event {
     std::optional<protocol::Message> response{};
     std::optional<protocol::PlayerPosition> position{};
     std::vector<std::uint64_t> departedIds{}; // Substituicoes por Hello do mesmo endpoint.
+    std::optional<protocol::PlayerOnFoot> onFoot{};
 };
 
 struct PeerState {
     std::uint64_t id;
     Endpoint endpoint;
     std::optional<protocol::PlayerPosition> position{};
+    std::optional<protocol::PlayerOnFoot> onFoot{};
+    bool onFootSubscribed = false;
 };
 
 class SessionTable {
@@ -58,6 +63,8 @@ public:
     [[nodiscard]] std::vector<std::uint64_t> expire(Time now);
     [[nodiscard]] std::size_t size() const noexcept { return sessions_.size(); }
     [[nodiscard]] std::vector<PeerState> peersExcept(std::uint64_t excludedId) const;
+    [[nodiscard]] bool onFootSubscribed(std::uint64_t id) const noexcept;
+    [[nodiscard]] std::optional<protocol::PlayerOnFoot> recentOnFoot(std::uint64_t id, Time now) const noexcept;
 
     static constexpr std::size_t maxSessions = 64;
     static constexpr auto sessionTimeout = std::chrono::seconds(10);
@@ -74,6 +81,8 @@ private:
         std::optional<protocol::PlayerPosition> position{};
         Time lastSnapshot{};
         bool hasRequestedSnapshot = false;
+        std::optional<protocol::PlayerOnFoot> onFoot{};
+        bool onFootSubscribed = false;
     };
 
     std::map<std::uint64_t, Session> sessions_;

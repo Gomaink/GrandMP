@@ -1,5 +1,7 @@
 #pragma once
 
+#include "grandmp/core/player_input.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -11,7 +13,7 @@ namespace grandmp::protocol {
 
 inline constexpr std::uint8_t kProtocolVersion = 1;
 inline constexpr std::size_t kHeaderSize = 8;
-inline constexpr std::size_t kMaxPacketSize = 32;
+inline constexpr std::size_t kMaxPacketSize = 80;
 inline constexpr float kMaxCoordinate = 100000.0f;
 
 enum class MessageType : std::uint8_t {
@@ -23,6 +25,9 @@ enum class MessageType : std::uint8_t {
     remote_position = 6,
     remote_leave = 7,
     snapshot_request = 8,
+    player_on_foot = 9,
+    remote_on_foot = 10,
+    on_foot_subscribe = 11,
 };
 
 struct Hello {
@@ -62,8 +67,26 @@ struct RemotePosition {
 struct RemoteLeave { std::uint64_t player_id; bool operator==(const RemoteLeave&) const = default; };
 struct SnapshotRequest { std::uint64_t session_id; bool operator==(const SnapshotRequest&) const = default; };
 
+// Optional v1 extension: messages 1-8 retain their exact bytes. Only a peer that
+// explicitly subscribes receives type 10. The recipient session rejects replay
+// from a previous connection before the controller sees any controls.
+struct PlayerOnFoot {
+    std::uint64_t session_id;
+    std::uint32_t sequence;
+    core::OnFootState state;
+    bool operator==(const PlayerOnFoot&) const = default;
+};
+struct RemoteOnFoot {
+    std::uint64_t recipient_session, player_id;
+    std::uint32_t sequence;
+    core::OnFootState state;
+    bool operator==(const RemoteOnFoot&) const = default;
+};
+struct OnFootSubscribe { std::uint64_t session_id; bool operator==(const OnFootSubscribe&) const = default; };
+
 using Message = std::variant<Hello, Welcome, PlayerPosition, Disconnect,
-                             RemoteJoin, RemotePosition, RemoteLeave, SnapshotRequest>;
+                             RemoteJoin, RemotePosition, RemoteLeave, SnapshotRequest,
+                             PlayerOnFoot, RemoteOnFoot, OnFootSubscribe>;
 
 enum class DecodeStatus {
     ok,

@@ -3,6 +3,7 @@
 #include "grandmp/windows/position_observer.hpp"
 #include "grandmp/core/remote_roster.hpp"
 #include "grandmp/core/remote_player_scene.hpp"
+#include "grandmp/core/remote_player_controller.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -33,13 +34,18 @@ public:
     // Sink opcional de diagnostico; seu tempo de vida deve superar o do observer.
     // Futuro adapter GTA devera operar apenas em um callback nativo homologado.
     void setRemoteSceneSink(core::IRemotePlayerSceneSink* sink) noexcept;
+    // Explicit opt-in only. Controller outlives network, like the existing sink.
+    void setRemotePlayerController(core::RemotePlayerController* controller) noexcept;
+    // Caller supplies an already captured, validated sample. This never reads GTA.
+    // Native CPad capture/replay remain blocked pending a Hoodlum contract.
+    [[nodiscard]] bool sendOnFoot(const core::OnFootState& sample) noexcept;
 
 private:
     void sendHello() noexcept;
     void receivePackets() noexcept;
     void sendSnapshotRequest() noexcept;
     void sendPosition(const Coordinates& position) noexcept;
-    void resetRemoteScene() noexcept;
+    void resetRemoteScene(core::RemoteEndReason reason=core::RemoteEndReason::session_changed) noexcept;
 
     std::uintptr_t socket_ = ~std::uintptr_t{0};
     std::uint16_t port_ = 0;
@@ -52,6 +58,7 @@ private:
     core::RemoteRoster roster_;
     core::RemotePlayerScene scene_;
     core::IRemotePlayerSceneSink* sceneSink_ = nullptr;
+    core::RemotePlayerController* playerController_ = nullptr;
     bool winsockStarted_ = false;
     bool initiated_ = false;
 };

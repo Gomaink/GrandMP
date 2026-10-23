@@ -10,6 +10,24 @@ SessionTable::SessionTable(std::uint64_t firstSessionId) noexcept
     : nextSessionId_(firstSessionId == 0 ? 1 : firstSessionId) {}
 
 Event SessionTable::handle(const protocol::Message& message, Endpoint endpoint, Time now) {
+    if (const auto* foot = std::get_if<protocol::PlayerOnFoot>(&message)) {
+        if (!foot->sequence || !core::validOnFoot(foot->state)) return {EventKind::ignored};
+        const auto& s=foot->state;
+        auto event=handle(protocol::PlayerPosition{foot->session_id,foot->sequence,s.x,s.y,s.z},endpoint,now);
+        if (event.kind==EventKind::position_accepted) {
+            sessions_.at(foot->session_id).onFoot=*foot;
+            event.kind=EventKind::on_foot_accepted; event.onFoot=*foot;
+        }
+        return event;
+    }
+    if (const auto* subscribe=std::get_if<protocol::OnFootSubscribe>(&message)) {
+        const auto it=sessions_.find(subscribe->session_id);
+        if (it==sessions_.end()) return {EventKind::rejected_unknown_session};
+        if (it->second.endpoint!=endpoint) return {EventKind::rejected_endpoint,subscribe->session_id};
+        if (it->second.onFootSubscribed) return {EventKind::ignored};
+        it->second.onFootSubscribed=true;
+        return {EventKind::on_foot_subscribed,subscribe->session_id};
+    }
     if (const auto* hello = std::get_if<protocol::Hello>(&message)) {
         for (auto& [id, session] : sessions_) {
             if (session.endpoint == endpoint && session.nonce == hello->nonce) {
@@ -59,6 +77,7 @@ Event SessionTable::handle(const protocol::Message& message, Endpoint endpoint, 
         session.lastActivity = now;
         session.hasPosition = true;
         session.position = *position;
+        session.onFoot.reset(); // A legacy sample cannot keep an older control state alive.
         return {EventKind::position_accepted, position->session_id, std::nullopt, *position};
     }
 
@@ -91,9 +110,21 @@ std::vector<PeerState> SessionTable::peersExcept(std::uint64_t excludedId) const
     std::vector<PeerState> peers;
     peers.reserve(sessions_.size());
     for (const auto& [id, session] : sessions_) {
-        if (id != excludedId) peers.push_back({id, session.endpoint, session.position});
+        if (id != excludedId) peers.push_back({id, session.endpoint, session.position, session.onFoot, session.onFootSubscribed});
     }
     return peers;
+}
+
+bool SessionTable::onFootSubscribed(std::uint64_t id) const noexcept {
+    const auto it=sessions_.find(id);
+    return it!=sessions_.end() && it->second.onFootSubscribed;
+}
+
+std::optional<protocol::PlayerOnFoot> SessionTable::recentOnFoot(std::uint64_t id, Time now) const noexcept {
+    const auto it=sessions_.find(id);
+    if (it==sessions_.end() || !it->second.onFoot || now<it->second.lastPosition ||
+        now-it->second.lastPosition>=core::onFootInputTimeout) return std::nullopt;
+    return it->second.onFoot;
 }
 
 std::vector<std::uint64_t> SessionTable::expire(Time now) {

@@ -3,6 +3,7 @@
 #include <windows.h>
 #include "../client/windows/tools/ped_smoke_state.hpp"
 #include "../client/windows/tools/ped_smoke_addresses.hpp"
+#include "../client/windows/tools/ped_smoke_install_diagnostics.hpp"
 #include "../client/windows/tools/ped_smoke_phase.hpp"
 #include "../client/windows/tools/ped_smoke_spawn.hpp"
 #include "../client/windows/tools/ped_smoke_move.hpp"
@@ -584,6 +585,81 @@ void movementAbi() {
         mn::taskStride == 0x80 && mn::walkVtable == 0x86FDA8, "Hoodlum task contracts");
 }
 
+void installDiagnostics() {
+    using ps::InstallDiagnostic;
+    using ps::InstallFailure;
+    using ps::InstallOutcome;
+    require(ps::f6WaitResult(false).failure == InstallFailure::f6_timeout_120s &&
+        ps::f6WaitResult(true).failure == InstallFailure::none,
+        "F6 observation deterministically distinguishes timeout from an initiated attempt");
+    require(std::string_view(ps::installFailureReason(InstallFailure::f6_timeout_120s)) == "f6_timeout_120s",
+        "120-second F6 timeout has a distinct diagnostic");
+    require(std::string_view(ps::installFailureReason(InstallFailure::window_thread_unavailable)) == "window_thread_unavailable" &&
+        std::string_view(ps::installFailureReason(InstallFailure::module_pin_failed)) == "module_pin_failed" &&
+        std::string_view(ps::installFailureReason(InstallFailure::set_windows_hook_failed)) == "set_windows_hook_failed" &&
+        std::string_view(ps::installFailureReason(InstallFailure::post_thread_message_failed)) == "post_thread_message_failed" &&
+        std::string_view(ps::installFailureReason(InstallFailure::callback_timeout_5000ms)) == "callback_timeout_5000ms" &&
+        std::string_view(ps::installFailureReason(InstallFailure::unhook_failed)) == "bootstrap_unhook_failed_module_pinned",
+        "bootstrap stages have distinct diagnostic reasons");
+    require(std::string_view(ps::installFailureReason(InstallFailure::candidate_player_not_ready)) ==
+        "install_candidate_player_not_ready" &&
+        std::string_view(ps::installFailureReason(InstallFailure::candidate_streaming_not_ready)) ==
+        "install_candidate_streaming_not_ready" &&
+        std::string_view(ps::installFailureReason(InstallFailure::candidate_code_identity_mismatch)) ==
+        "install_candidate_code_identity_mismatch" &&
+        std::string_view(ps::installFailureReason(InstallFailure::candidate_call_encoding_failed)) ==
+        "install_candidate_call_encoding_failed" &&
+        std::string_view(ps::installFailureReason(InstallFailure::candidate_virtual_protect_failed)) ==
+        "install_candidate_virtual_protect_failed" &&
+        std::string_view(ps::installFailureReason(InstallFailure::candidate_unexpected_page_protection)) ==
+        "install_candidate_unexpected_page_protection" &&
+        std::string_view(ps::installFailureReason(InstallFailure::candidate_instruction_cache_flush_failed)) ==
+        "install_candidate_instruction_cache_flush_failed_module_pinned_no_engine_dispatch" &&
+        std::string_view(ps::installFailureReason(InstallFailure::candidate_protection_restore_failed)) ==
+        "install_candidate_protection_restore_failed_module_pinned_no_engine_dispatch" &&
+        std::string_view(ps::installFailureReason(InstallFailure::candidate_post_publish_code_mismatch)) ==
+        "install_candidate_post_publish_code_mismatch_module_pinned_no_engine_dispatch",
+        "candidate rejection identifies its failed guard and CALL publication verification");
+    const InstallDiagnostic apiFailure{InstallFailure::post_thread_message_failed, 5, true};
+    require(apiFailure.hasWin32Error && apiFailure.win32Error == 5,
+        "Win32 failure retains the error captured at the API call site");
+    char formatted[128]{};
+    require(ps::formatInstallDiagnostic(formatted, sizeof(formatted), apiFailure) &&
+        std::string_view(formatted) == "post_thread_message_failed win32_error=5",
+        "Win32 API failure renders its captured error in the later worker diagnostic");
+    char tooSmall[8]{};
+    require(!ps::formatInstallDiagnostic(tooSmall, sizeof(tooSmall), apiFailure) && tooSmall[sizeof(tooSmall)-1] == '\0',
+        "bootstrap diagnostic formatting rejects truncation safely");
+    InstallOutcome callbackSucceededAfterPostWarning{};
+    callbackSucceededAfterPostWarning.bootstrapWarning = apiFailure;
+    require(callbackSucceededAfterPostWarning.succeeded(),
+        "a callback already observed remains successful if its extra wake-message post failed");
+    callbackSucceededAfterPostWarning.primary.failure = InstallFailure::candidate_player_not_ready;
+    require(!callbackSucceededAfterPostWarning.succeeded(), "candidate rejection remains failed");
+    callbackSucceededAfterPostWarning.primary.failure = InstallFailure::none;
+    callbackSucceededAfterPostWarning.primary = {InstallFailure::candidate_instruction_cache_flush_failed, 31, true};
+    callbackSucceededAfterPostWarning.candidateCleanup = {InstallFailure::candidate_protection_restore_failed, 5, true};
+    callbackSucceededAfterPostWarning.unhookFailure = {InstallFailure::unhook_failed, 6, true};
+    require(!callbackSucceededAfterPostWarning.succeeded() &&
+        callbackSucceededAfterPostWarning.primary.failure == InstallFailure::candidate_instruction_cache_flush_failed &&
+        callbackSucceededAfterPostWarning.primary.win32Error == 31 &&
+        callbackSucceededAfterPostWarning.candidateCleanup.failure == InstallFailure::candidate_protection_restore_failed &&
+        callbackSucceededAfterPostWarning.candidateCleanup.win32Error == 5 &&
+        callbackSucceededAfterPostWarning.unhookFailure.failure == InstallFailure::unhook_failed &&
+        callbackSucceededAfterPostWarning.unhookFailure.win32Error == 6,
+        "primary candidate failure, protection-restore cleanup, and bootstrap unhook failure coexist without masking");
+    char primaryText[128]{};
+    char cleanupText[128]{};
+    char unhookText[128]{};
+    require(ps::formatInstallDiagnostic(primaryText, sizeof(primaryText), callbackSucceededAfterPostWarning.primary) &&
+        ps::formatInstallDiagnostic(cleanupText, sizeof(cleanupText), callbackSucceededAfterPostWarning.candidateCleanup) &&
+        ps::formatInstallDiagnostic(unhookText, sizeof(unhookText), callbackSucceededAfterPostWarning.unhookFailure) &&
+        std::string_view(primaryText) == "install_candidate_instruction_cache_flush_failed_module_pinned_no_engine_dispatch win32_error=31" &&
+        std::string_view(cleanupText) == "install_candidate_protection_restore_failed_module_pinned_no_engine_dispatch win32_error=5" &&
+        std::string_view(unhookText) == "bootstrap_unhook_failed_module_pinned win32_error=6",
+        "primary, page-protection restore, and Unhook failures remain individually reportable");
+}
+
 void initialization(const wchar_t* path, bool enabled = false) {
     require(ps::physicalExecutionApproved == enabled, "test build gate must match the requested artifact");
     SetEnvironmentVariableW(L"GRANDMP_PED_SMOKE_ENABLE", L"1"); // Alone cannot override the build/identity gates.
@@ -629,6 +705,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (std::wstring_view(argv[1]) == L"move_geometry") movementGeometry();
         else if (std::wstring_view(argv[1]).starts_with(L"move_")) movementTest(argv[1]);
         else if (std::wstring_view(argv[1]) == L"phase_abi") phaseAbi();
+        else if (std::wstring_view(argv[1]) == L"install_diagnostics") installDiagnostics();
         else if (std::wstring_view(argv[1]) == L"spawn_diagnostics") spawnDiagnostics(false);
         else if (std::wstring_view(argv[1]) == L"spawn_nonfinite") spawnDiagnostics(true);
         else if (std::wstring_view(argv[1]) == L"lifecycle_loss" || std::wstring_view(argv[1]) == L"terminal_removal" ||
