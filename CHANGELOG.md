@@ -2,6 +2,20 @@
 
 Milestone dates refer to development validation, not packaged releases. Game binaries and private smoke records are not distributed.
 
+## Alpha 0.11.2 — 2026-11-02
+
+### Validated physically
+
+- One independent, pool-owned CPlayerPed walked, changed direction and stopped through the native control path in a single GTA, using a deterministic local source.
+- The bounded log recorded 339 consecutive completed dispatches, approximately 4.53 m net XY displacement and twelve unchanged local-CJ sample pairs.
+- The operator confirmed GTA A rollback and that GTA B was untouched.
+
+### Contract and limits
+
+- Semantic recognition is restricted to a full clock-matched LastTimeTouched update; the other 208 tail bytes, 96-byte pad writer/restoration and terminal guards remain protected.
+- No UDP, physical Scene presentation, cooperative player registration, new global hook or direct pose/velocity write is introduced by this proof. Experimental options remain OFF by default.
+- Independent removal was not demonstrated by this collection. Alpha 0.12 prioritizes lifecycle and authenticated cleanup before two-client integration. See the [closeout](docs/alpha-0.11.2-closeout.md).
+
 ## Alpha 0.8 — 2026-10-22
 
 ### Added

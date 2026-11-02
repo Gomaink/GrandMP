@@ -3,6 +3,7 @@
 #include "ped_smoke_runtime_read.hpp"
 #include <cstdio>
 #include <cstring>
+#include <array>
 
 namespace grandmp::windows::ped_smoke {
 // Failure evidence only: no entity pointers, memory contents, or execution lease.
@@ -14,7 +15,83 @@ struct CodeIdentityFailure {
     std::size_t transferred = 0;
 };
 inline bool identityRefuse(CodeIdentityFailure& f, const char* category,
-                           std::uint32_t address, std::size_t size, DWORD error = 0) noexcept {
+                           std::uint32_t address, std::size_t size, DWORD error = 0) noexcept;
+
+// The physical capture authenticated this exact Hoodlum code window and its
+// two image pages. This is deliberately not a general PAGE_EXECUTE_WRITECOPY
+// allowance. Runtime bytes still require a complete comparison with disk.
+inline constexpr std::uint32_t hoodlumCowWindowAddress = 0x53BEE0;
+inline constexpr std::size_t hoodlumCowWindowSize = 380;
+inline constexpr std::array<std::uint32_t, 2> hoodlumCowPages{0x53B000, 0x53C000};
+inline constexpr std::size_t hoodlumPageSize = 0x1000;
+inline constexpr std::array<CodeRegion, 5> hoodlumCowCodeWindows{{
+    {hoodlumCowWindowAddress, static_cast<std::uint32_t>(hoodlumCowWindowSize)},
+    {0x53BC60, 0x1A}, // background focus-call bytes, fully disk-compared by its caller
+    {0x53BEE6, 5}, // background input CALL, fully disk-compared by its caller
+    {phaseCall + 5, 0x53C09A - phaseCall - 5},
+    {phaseCall, 5}
+}};
+inline bool hoodlumCowCodeWindow(std::uint32_t at, std::size_t size) noexcept {
+    for (const auto& region : hoodlumCowCodeWindows)
+        if (region.address == at && region.size == size) return true;
+    return false;
+}
+
+struct CodePageObservation {
+    std::uint32_t queriedAddress = 0;
+    std::uint64_t baseAddress = 0, regionSize = 0;
+    std::uintptr_t allocationBase = 0;
+    DWORD state = 0, type = 0, protection = 0, allocationProtection = 0;
+    bool queryComplete = false;
+    DWORD queryError = 0;
+    bool workingSetComplete = false, workingSetValid = false, workingSetShared = false;
+    DWORD workingSetError = 0;
+};
+
+inline bool identityHoodlumCowPages(CodeIdentityFailure& f, std::uint32_t at, std::size_t size,
+                                     const std::array<CodePageObservation, 2>& pages,
+                                     bool hoodlumIdentityAuthenticated,
+                                     const std::array<bool, 2>& privatePageOwnedByExactPatch) noexcept {
+    if (!hoodlumCowCodeWindow(at, size))
+        return identityRefuse(f, "cow_window_not_allowed", at, size);
+    if (!hoodlumIdentityAuthenticated)
+        return identityRefuse(f, "hoodlum_identity_unavailable", at, size);
+    for (std::size_t i = 0; i < pages.size(); ++i) {
+        const auto& page = pages[i];
+        const auto expectedAddress = hoodlumCowPages[i];
+        if (!page.queryComplete)
+            return identityRefuse(f, "page_query_failed", expectedAddress, hoodlumPageSize, page.queryError);
+        if (page.queriedAddress != expectedAddress)
+            return identityRefuse(f, "page_query_address", expectedAddress, hoodlumPageSize);
+        if (page.state != MEM_COMMIT)
+            return identityRefuse(f, "page_state", expectedAddress, hoodlumPageSize);
+        if (page.type != MEM_IMAGE)
+            return identityRefuse(f, "page_type", expectedAddress, hoodlumPageSize);
+        if (page.allocationBase != imageBase)
+            return identityRefuse(f, "image_allocation", expectedAddress, hoodlumPageSize);
+        if (page.protection != PAGE_EXECUTE_WRITECOPY ||
+            page.allocationProtection != PAGE_EXECUTE_WRITECOPY) {
+            if (!std::strcmp(f.category, "none")) {
+                f.expectedProtection = PAGE_EXECUTE_WRITECOPY;
+                f.alternateProtection = 0;
+                f.observedProtection = page.protection;
+            }
+            return identityRefuse(f, "page_protection", expectedAddress, hoodlumPageSize);
+        }
+        const auto regionEnd = page.baseAddress + page.regionSize;
+        if (page.baseAddress > expectedAddress || regionEnd < std::uint64_t{expectedAddress} + hoodlumPageSize)
+            return identityRefuse(f, "page_span", expectedAddress, hoodlumPageSize);
+        if (!page.workingSetComplete)
+            return identityRefuse(f, "working_set_query_failed", expectedAddress, hoodlumPageSize, page.workingSetError);
+        if (!page.workingSetValid)
+            return identityRefuse(f, "working_set_not_resident", expectedAddress, hoodlumPageSize);
+        if (!page.workingSetShared && !privatePageOwnedByExactPatch[i])
+            return identityRefuse(f, "working_set_private_unowned", expectedAddress, hoodlumPageSize);
+    }
+    return true;
+}
+inline bool identityRefuse(CodeIdentityFailure& f, const char* category,
+                           std::uint32_t address, std::size_t size, DWORD error) noexcept {
     if (!std::strcmp(f.category, "none")) {
         f.category = category; f.address = address; f.size = static_cast<std::uint32_t>(size); f.error = error;
     }

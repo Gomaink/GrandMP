@@ -3,6 +3,8 @@
 #include <windows.h>
 #include "grandmp/windows/remote_player_binding.hpp"
 #include "grandmp/windows/remote_player_hoodlum.hpp"
+#include "../client/windows/cleo/independent_control_proof.hpp"
+#include "../client/windows/tools/semantic_pad_context.hpp"
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -14,6 +16,11 @@
 
 using namespace grandmp;
 namespace rb=windows::remote_player_binding;
+namespace semantic=windows::semantic_pad_context;
+namespace tail=windows::remote_tail_diagnostic;
+void touched(tail::Tail& value,std::uint32_t time){
+    for(unsigned n=0;n<4;++n)value[0x120-0x60+n]=std::byte((time>>(8*n))&255);
+}
 using namespace std::chrono_literals;
 void check(bool value,const char* why) { if (!value) throw std::runtime_error(why); }
 using Time=core::RemoteRoster::Time;
@@ -24,6 +31,11 @@ struct TestApi final : rb::Api {
     bool authorized=true,factory=true,removal=true,replay=true,ownership=true,dispatchOkay=true;
     bool captureOkay=true,applyOkay=true,restoreOkay=true,postcondition=true;
     bool throwApply=false,throwOriginal=false,sehOriginal=false,reenter=false;
+    bool originalOkay=true,loseOwnershipOnApply=false,sehCapture=false;
+    bool semanticEnabled=false,semanticReturned=false,loseOwnershipOnReturn=false;
+    tail::Tail engineTail{},savedTail{},nextTail{};
+    tail::Boundary clockBefore{7,14552,4,0,true},clockAfter{7,14552,4,0,true};
+    semantic::Decision semanticDecision=semantic::Decision::not_observed;
     rb::Creation creation=rb::Creation::complete;
     rb::Removal removalResult=rb::Removal::complete;
     unsigned probes=0,creates=0,removes=0,captures=0,applies=0,originals=0,restores=0;
@@ -61,12 +73,15 @@ struct TestApi final : rb::Api {
     }
     bool dispatch(const rb::Record&,const rb::Dispatch&) noexcept override { return dispatchOkay; }
     bool capture(rb::ContextImage& image) noexcept override {
+        if(sehCapture) RaiseException(0xE0421234,0,0,nullptr);
         ++captures;if (!captureOkay) return false;
+        if(semanticEnabled){savedTail=engineTail;semanticReturned=false;}
         image.used=contextBytes.size();std::memcpy(image.bytes.data(),contextBytes.data(),image.used);return true;
     }
     bool apply(const rb::Record&,const rb::Controls& input) override {
         ++applies;controls=input;contextBytes.fill(std::byte{0xab});
         if (throwApply) throw std::runtime_error("partial input application");
+        if (loseOwnershipOnApply) ownership=false;
         return applyOkay;
     }
     bool original(const rb::Record&) override {
@@ -74,10 +89,18 @@ struct TestApi final : rb::Api {
         if (reenter) check(binding->process(*controller,start,activeDispatch,*this)==rb::Result::reentrant,"reentry denied");
         if (throwOriginal) throw std::runtime_error("original throws");
         if (sehOriginal) RaiseException(0xE0421234,0,0,nullptr);
-        return true;
+        if(semanticEnabled){engineTail=nextTail;semanticReturned=originalOkay;}
+        if(loseOwnershipOnReturn)ownership=false;
+        return originalOkay;
     }
     bool restore(const rb::ContextImage& image) noexcept override {
-        ++restores;std::memcpy(contextBytes.data(),image.bytes.data(),contextBytes.size());return restoreOkay;
+        ++restores;std::memcpy(contextBytes.data(),image.bytes.data(),contextBytes.size());
+        if(!restoreOkay)return false;
+        if(semanticEnabled){
+            semanticDecision=semantic::evaluate(savedTail,engineTail,clockBefore,clockAfter,semanticReturned);
+            return semantic::accepted(semanticDecision); // Shared real policy, never restore the engine-owned history.
+        }
+        return true;
     }
 };
 struct Fixture {
@@ -94,16 +117,16 @@ struct Fixture {
         controller.synchronize(roster,now);
     }
     rb::Result consume(Time now=start) { return binding->consume(controller,now,api); }
-    rb::Result process(std::uint64_t serial,Time now=start) {
+    rb::Result process(std::uint64_t serial,Time now=start,rb::ProcessObservation* observation=nullptr) {
         api.activeDispatch={api.authenticated.key,api.authenticated.entity.ped,serial};
-        return binding->process(controller,now,api.activeDispatch,api);
+        return binding->process(controller,now,api.activeDispatch,api,observation);
     }
     void admit() { sample(1);check(consume()==rb::Result::created,"single test entity created"); }
     void leave() { check(roster.left({12},start+1ms),"leave");controller.synchronize(roster,start+1ms); }
 };
 // Keep SEH handler in an object-free frame; do not hide faults in production code.
-bool sehCall(Fixture* fixture) {
-    __try { (void)fixture->process(1);return false; }
+bool sehCall(Fixture* fixture,rb::ProcessObservation* observation=nullptr) {
+    __try { (void)fixture->process(1,start,observation);return false; }
     __except(GetExceptionCode()==0xE0421234 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { return true; }
 }
 void run(std::string_view which,const char* executable) {
@@ -128,6 +151,31 @@ void run(std::string_view which,const char* executable) {
         check(!rb::inspectHoodlumPlayerContract(std::as_bytes(std::span(bytes))).exactExecutable,"one changed byte refuses identity");return;
     }
     Fixture f;
+    if(which=="proof_source" || which=="proof_timeout"){
+        namespace proof=windows::independent_control_proof;
+        static_assert(!proof::enabled); // Only the isolated physical target opens it.
+        proof::Source source;core::OnFootState reference{};reference.x=100;reference.y=200;reference.z=30;
+        check(source.begin(reference,start,f.controller) && f.consume()==rb::Result::created,"actual Controller/Binding, one admission, no UDP");
+        const auto key=f.binding->key();
+        check(f.process(1)==rb::Result::processed && f.api.controls.current.forward==1 && f.api.controls.current.right==0,"walk through original Binding");
+        if(which=="proof_timeout"){
+            check(f.process(2,start+501ms)==rb::Result::processed && f.api.controls.current==core::PlayerControls{},"missing local update neutralizes using existing timeout");
+            check(!source.publish(start-1ms,f.controller) && !source.begin(reference,start,f.controller) &&
+                !source.publish(start+1s,f.controller),"clock failure terminal and source never restarts");return;
+        }
+        check(source.publish(start+2s,f.controller) && f.consume(start+2s)==rb::Result::updated &&
+            f.process(2,start+2s)==rb::Result::processed && f.api.controls.current.right==1 && f.api.controls.current.forward==0,"turn on the SAME native binding identity");
+        check(source.publish(start+4s,f.controller) && f.consume(start+4s)==rb::Result::updated &&
+            f.process(3,start+4s)==rb::Result::processed && f.api.controls.current==core::PlayerControls{},"neutral stop, no pose or velocity command");
+        check(source.publish(start+6s,f.controller) && source.complete(start+6s) && f.consume(start+6s)==rb::Result::updated &&
+            f.process(4,start+6s)==rb::Result::processed && f.api.controls.current==core::PlayerControls{},"neutral persists, no automatic restart");
+        core::RemotePlayerFrames frames{};check(f.controller.tryRead(start+6s,frames) && frames.count==1 &&
+            frames.players[0].presentation.x==100 && frames.players[0].presentation.y==200 && frames.players[0].presentation.z==30 &&
+            frames.players[0].reference.vx==0 && frames.players[0].reference.vy==0,"XYZ is a fixed spawn/reference, never simulated movement");
+        check(f.binding->key()==key && f.api.creates==1 && f.api.originals==4 && f.api.applies==4 && f.api.restores==4 && !f.api.removes,
+            "one original per admitted dispatch, no factory/task spam");
+        check(f.binding->requestRemoval(f.api)==rb::Result::removed && f.api.removes==1,"existing authenticated removal, no new lifecycle");return;
+    }
     if (which=="contract") {
         f.sample(1);f.api.factory=false;
         check(f.consume()==rb::Result::blocked_contract && !f.api.creates,"unproven slot cannot create");
@@ -140,6 +188,107 @@ void run(std::string_view which,const char* executable) {
     }
     f.admit();
     const auto original=f.api.contextBytes;
+    if(which.starts_with("semantic_")){
+        f.api.semanticEnabled=true;touched(f.api.nextTail,14552);
+        if(which=="semantic_sequence"){
+            const auto key=f.binding->key();
+            for(unsigned step=1;step<=3;++step){
+                if(step>1){f.sample(step,step==2 ? 1.f:0.f,0.f);check(f.consume()==rb::Result::updated,"same logical entity updated");}
+                const auto prior=tail::touched(f.api.engineTail),now=14551u+step;
+                f.api.clockBefore.engineMs=f.api.clockAfter.engineMs=now;touched(f.api.nextTail,now);
+                rb::ProcessObservation observation{};
+                check(f.process(step,start,&observation)==rb::Result::processed && f.binding->state()==rb::State::live,"all validations complete before live");
+                check(tail::touched(f.api.savedTail)==prior && tail::touched(f.api.engineTail)==now,"native timestamp persists rather than being restored");
+                check(f.api.contextBytes==original && f.api.semanticDecision==semantic::Decision::native_touch &&
+                    (observation.passed&(1u<<static_cast<unsigned>(rb::ProcessStep::after_original))),"local context and post-original ownership still required");
+                check(step==1 ? f.api.controls.current.forward==1.f : step==2 ? f.api.controls.current.right==1.f : f.api.controls.current==core::PlayerControls{},"walk, lateral, neutral on same record");
+            }
+            check(f.binding->key()==key && f.api.creates==1 && f.api.originals==3 && f.api.restores==3 && !f.api.removes,"three consecutive native-call contracts, no recreation or extra original");return;
+        }
+        if(which=="semantic_clock")++f.api.clockAfter.engineMs;
+        else if(which=="semantic_unknown")f.api.nextTail.front()=std::byte{1};
+        else if(which=="semantic_combined"){f.api.nextTail.back()=std::byte{1};touched(f.api.nextTail,123);}
+        else if(which=="semantic_restore")f.api.restoreOkay=false;
+        else if(which=="semantic_post_identity")f.api.loseOwnershipOnReturn=true;
+        else if(which=="semantic_original")f.api.originalOkay=false;
+        else throw std::runtime_error("unknown semantic binding case");
+        const auto expected=which=="semantic_post_identity" ? rb::Result::ownership_lost:rb::Result::restore_failed;
+        check(f.process(1)==expected && f.binding->state()!=rb::State::live,"refused semantic or other guard never returns live");
+        check(f.api.contextBytes==original && f.api.originals==1 && f.api.restores==1,"existing restoration still runs exactly once");
+        const auto calls=f.api.originals;
+        check(f.process(2)==rb::Result::indeterminate && f.api.originals==calls && f.api.restores==1,"terminal forbids retry or second original");
+        if(which=="semantic_restore")check(f.api.semanticDecision==semantic::Decision::not_observed,"restore failure cannot be promoted by semantic exception");return;
+    }
+    if (which.starts_with("trace_")) {
+        rb::ProcessObservation trace{};
+        using Step=rb::ProcessStep;
+        const auto entered=[&](Step step){return (trace.entered&(1u<<static_cast<unsigned>(step)))!=0;};
+        const auto passed=[&](Step step){return (trace.passed&(1u<<static_cast<unsigned>(step)))!=0;};
+        if(which=="trace_context") {
+            f.api.authorized=false;
+            check(f.process(1,start,&trace)==rb::Result::context_refused && trace.primary==Step::context &&
+                !entered(Step::replay) && !f.api.captures && !f.api.originals,"phase refusal has no downstream calls");return;
+        }
+        if(which=="trace_capture_seh") {
+            f.api.sehCapture=true;
+            check(sehCall(&f,&trace) && trace.body==Step::capture && entered(Step::capture) &&
+                !passed(Step::capture) && !entered(Step::apply) && !entered(Step::restore) && !f.api.originals,
+                "capture entry marked before the call; no fictitious restoration without a saved image");return;
+        }
+        f.api.captureOkay=which!="trace_capture";
+        f.api.applyOkay=which!="trace_apply" && which!="trace_combined";
+        f.api.restoreOkay=which!="trace_combined";
+        f.api.originalOkay=which!="trace_original";
+        f.api.loseOwnershipOnApply=which=="trace_before_original";
+        f.api.throwOriginal=which=="trace_exception";
+        f.api.sehOriginal=which=="trace_seh";
+        if(which=="trace_seh") {
+            check(sehCall(&f,&trace) && trace.body==Step::original && entered(Step::original) &&
+                !passed(Step::original) && passed(Step::restore) && !trace.cppException,"SEH still propagates, finally is independently observable");
+        } else {
+            const auto result=f.process(1,start,&trace);
+            const Step first=which=="trace_capture" ? Step::capture : which=="trace_apply" || which=="trace_combined" ? Step::apply :
+                which=="trace_before_original" ? Step::before_original : which=="trace_original" || which=="trace_exception" ? Step::original : Step::none;
+            check(trace.primary==first,"first refused stage retained");
+            const auto expected=which=="trace_capture" || which=="trace_apply" ? rb::Result::context_failed :
+                which=="trace_combined" ? rb::Result::restore_failed : which=="trace_before_original" || which=="trace_original" || which=="trace_exception" ?
+                rb::Result::original_failed : rb::Result::processed;
+            check(result==expected,"observation preserves existing Result including restore precedence");
+            if(which=="trace_success")check(passed(Step::complete) && f.api.probes==4 && f.api.captures==1 &&
+                f.api.originals==1 && f.api.applies==1 && f.api.restores==1,"one original and unchanged authentication/capture counts");
+            if(which=="trace_exception")check(trace.cppException && !passed(Step::original),"caught C++ original failure distinguished from normal false return");
+        }
+        if(which=="trace_capture")check(!entered(Step::apply) && !entered(Step::restore) && !f.api.applies && !f.api.restores,"capture refusal never applies or restores");
+        else {
+            check(entered(Step::restore) && passed(Step::restore)==f.api.restoreOkay && f.api.restores==1 && f.api.contextBytes==original,"restore observed once including combined failure");
+            if(which=="trace_apply" || which=="trace_combined" || which=="trace_before_original")check(!entered(Step::original) && !f.api.originals,"original never invented after an earlier refusal");
+        }
+        if(which!="trace_success") {
+            const auto calls=f.api.originals;
+            check(f.process(2)==rb::Result::indeterminate && f.api.originals==calls,"trace never retries a terminal processing failure");
+        }
+        return;
+    }
+    if (which=="dispatch_identity") {
+        check(f.binding->authenticatesDispatchEntity(101,f.api),"live record reauthenticated for routing");
+        auto probes=f.api.probes;
+        check(!f.binding->authenticatesDispatchEntity(999,f.api) && f.api.probes==probes,"foreign address never probed as owned");
+        f.api.authorized=false;
+        check(!f.binding->authenticatesDispatchEntity(101,f.api) && f.api.probes==probes,"phase refused before identity reads");
+        f.api.authorized=true;f.api.ownership=false;
+        check(!f.binding->authenticatesDispatchEntity(101,f.api),"historical pointer does not authenticate a remote");
+        check(!f.api.applies && !f.api.originals && f.api.creates==1,"routing has no controls, dispatch or second construction");return;
+    }
+    if (which=="dispatch_identity_thread") {
+        const auto probes=f.api.probes;bool accepted=true;
+        std::thread other([&]{accepted=f.binding->authenticatesDispatchEntity(101,f.api);});other.join();
+        check(!accepted && probes==f.api.probes,"no probes from foreign thread");return;
+    }
+    if (which=="dispatch_identity_retired") {
+        f.leave();check(f.consume()==rb::Result::removed,"retire prior identity");
+        const auto probes=f.api.probes;
+        check(!f.binding->authenticatesDispatchEntity(101,f.api) && probes==f.api.probes,"retired address never authorizes routing");return;
+    }
     if (which=="pipeline") {
         check(f.process(1)==rb::Result::processed && f.api.controls.current.forward==1,"walk");
         const auto identity=f.api.authenticated;

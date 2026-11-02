@@ -5,6 +5,138 @@ add_library(grandmp_windows_detection STATIC
     src/player_position_diagnostics.cpp
 )
 
+option(GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP "Expose isolated CLEO4 slot-1 factory prototype" OFF)
+option(GRANDMP_ENABLE_CLEO_PLAYER_SYNC "Add real-client capture and existing remote replay to CLEO prototype" OFF)
+option(GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION "Expose isolated Alpha 0.10 pool-owned CPlayerPed foundation" OFF)
+option(GRANDMP_BUILD_INDEPENDENT_NATIVE_CONTROL_PROOF "Expose isolated Alpha 0.11 single-GTA native input proof (no UDP/presentation)" OFF)
+option(GRANDMP_ENABLE_AUTHENTICATED_PAD_COW "Enable exact Hoodlum pad1 data exception in the independent proof only" OFF)
+option(GRANDMP_ENABLE_REMOTE_TAIL_DIAGNOSTIC "Add bounded read-only Alpha 0.11.1-D1 tail diagnostics to the independent proof" OFF)
+option(GRANDMP_ENABLE_SEMANTIC_PAD_CONTEXT "Enable the exact Alpha 0.11.2 LastTimeTouched contract in the isolated proof" OFF)
+if(GRANDMP_ENABLE_SEMANTIC_PAD_CONTEXT AND NOT GRANDMP_ENABLE_REMOTE_TAIL_DIAGNOSTIC)
+    message(FATAL_ERROR "Semantic pad context requires the isolated D1 diagnostics, independent proof and authenticated pad COW")
+endif()
+if(GRANDMP_ENABLE_REMOTE_TAIL_DIAGNOSTIC AND NOT (GRANDMP_BUILD_INDEPENDENT_NATIVE_CONTROL_PROOF AND GRANDMP_ENABLE_AUTHENTICATED_PAD_COW))
+    message(FATAL_ERROR "Remote tail D1 requires the isolated independent proof and its authenticated pad COW contract")
+endif()
+if(GRANDMP_ENABLE_AUTHENTICATED_PAD_COW AND NOT GRANDMP_BUILD_INDEPENDENT_NATIVE_CONTROL_PROOF)
+    message(FATAL_ERROR "Authenticated pad COW requires the isolated independent proof")
+endif()
+set(GRANDMP_CLEO4_SDK_DIR "" CACHE PATH "Exact CLEO4 4.4.4 cleo_sdk directory")
+set(GRANDMP_SANNY_COMPILER "" CACHE FILEPATH "Sanny Builder compiler, used offline only")
+if((GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP AND GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION) OR
+   (GRANDMP_BUILD_INDEPENDENT_NATIVE_CONTROL_PROOF AND (GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP OR GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION)))
+    message(FATAL_ERROR "Select one CLEO player variant; never coinstall them")
+endif()
+if(GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP OR GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION OR GRANDMP_BUILD_INDEPENDENT_NATIVE_CONTROL_PROOF)
+    if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
+        message(FATAL_ERROR "CLEO bootstrap requires MSVC Win32")
+    endif()
+    if(NOT EXISTS "${GRANDMP_CLEO4_SDK_DIR}/CLEO.lib" OR NOT EXISTS "${GRANDMP_CLEO4_SDK_DIR}/CLEO.h" OR NOT EXISTS "${GRANDMP_SANNY_COMPILER}")
+        message(FATAL_ERROR "Explicit CLEO4 SDK and Sanny compiler required")
+    endif()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(cleo_generated "${CMAKE_CURRENT_BINARY_DIR}/cleo-player-script")
+    add_custom_command(OUTPUT "${cleo_generated}/script_image.hpp" "${cleo_generated}/GrandMPPlayerBootstrap.cs"
+        COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/build_cleo_script.py"
+            --compiler "${GRANDMP_SANNY_COMPILER}" --source "${CMAKE_CURRENT_SOURCE_DIR}/cleo/GrandMPPlayerBootstrap.txt"
+            --output "${cleo_generated}/GrandMPPlayerBootstrap.cs" --header "${cleo_generated}/script_image.hpp"
+        DEPENDS cleo/GrandMPPlayerBootstrap.txt "${PROJECT_SOURCE_DIR}/scripts/build_cleo_script.py" VERBATIM)
+    if(GRANDMP_BUILD_INDEPENDENT_NATIVE_CONTROL_PROOF)
+        add_library(grandmp_independent_native_control_proof MODULE EXCLUDE_FROM_ALL cleo/player_bootstrap.cpp
+            "${cleo_generated}/script_image.hpp" src/pooled_remote_player.cpp src/remote_player_binding.cpp)
+        target_compile_features(grandmp_independent_native_control_proof PRIVATE cxx_std_20)
+        target_compile_options(grandmp_independent_native_control_proof PRIVATE /W4 /WX /EHsc /Oy- /JMC-)
+        target_link_options(grandmp_independent_native_control_proof PRIVATE /INCREMENTAL:NO
+            "/MAP:$<TARGET_FILE_DIR:grandmp_independent_native_control_proof>/GrandMPPlayerBootstrap.map")
+        target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_POOLED_REMOTE_PLAYER_BUILD=1
+            GRANDMP_CLEO_PLAYER_SYNC_BUILD=1 GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD=1
+            GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=0 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0 GRANDMP_NATIVE_INPUT_REPLAY_BUILD=0)
+        if(GRANDMP_ENABLE_AUTHENTICATED_PAD_COW)
+            target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_AUTHENTICATED_PAD_COW_BUILD=1)
+        endif()
+        if(GRANDMP_ENABLE_REMOTE_TAIL_DIAGNOSTIC)
+            target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_REMOTE_TAIL_DIAGNOSTIC_BUILD=1)
+        endif()
+        if(GRANDMP_ENABLE_SEMANTIC_PAD_CONTEXT)
+            target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_SEMANTIC_PAD_CONTEXT_BUILD=1)
+        endif()
+        target_include_directories(grandmp_independent_native_control_proof PRIVATE include "${GRANDMP_CLEO4_SDK_DIR}" "${cleo_generated}")
+        target_link_libraries(grandmp_independent_native_control_proof PRIVATE GrandMP::Shared "${GRANDMP_CLEO4_SDK_DIR}/CLEO.lib" bcrypt user32)
+        set_target_properties(grandmp_independent_native_control_proof PROPERTIES PREFIX "" SUFFIX ".cleo" OUTPUT_NAME "GrandMPPlayerBootstrap"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof")
+        if(GRANDMP_ENABLE_AUTHENTICATED_PAD_COW)
+            set_target_properties(grandmp_independent_native_control_proof PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof-pad-cow"
+                LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof-pad-cow")
+        endif()
+        if(GRANDMP_ENABLE_REMOTE_TAIL_DIAGNOSTIC)
+            set_target_properties(grandmp_independent_native_control_proof PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof-pad-cow-tail-d1"
+                LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof-pad-cow-tail-d1")
+        endif()
+        if(GRANDMP_ENABLE_SEMANTIC_PAD_CONTEXT)
+            set_target_properties(grandmp_independent_native_control_proof PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof-semantic-pad"
+                LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof-semantic-pad")
+        endif()
+    elseif(GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION)
+        add_library(grandmp_remote_player_foundation MODULE EXCLUDE_FROM_ALL cleo/player_bootstrap.cpp
+            "${cleo_generated}/script_image.hpp" src/pooled_remote_player.cpp src/remote_player_binding.cpp src/observer_network.cpp)
+        target_compile_features(grandmp_remote_player_foundation PRIVATE cxx_std_20)
+        target_compile_options(grandmp_remote_player_foundation PRIVATE /W4 /WX /EHsc /Oy- /JMC-)
+        target_link_options(grandmp_remote_player_foundation PRIVATE /INCREMENTAL:NO
+            "/MAP:$<TARGET_FILE_DIR:grandmp_remote_player_foundation>/GrandMPPlayerBootstrap.map")
+        target_compile_definitions(grandmp_remote_player_foundation PRIVATE GRANDMP_POOLED_REMOTE_PLAYER_BUILD=1
+            GRANDMP_CLEO_PLAYER_SYNC_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1
+            GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0 GRANDMP_NATIVE_INPUT_REPLAY_BUILD=0)
+        target_include_directories(grandmp_remote_player_foundation PRIVATE include "${GRANDMP_CLEO4_SDK_DIR}" "${cleo_generated}")
+        target_link_libraries(grandmp_remote_player_foundation PRIVATE GrandMP::Shared "${GRANDMP_CLEO4_SDK_DIR}/CLEO.lib" bcrypt user32 ws2_32)
+        set_target_properties(grandmp_remote_player_foundation PROPERTIES PREFIX "" SUFFIX ".cleo" OUTPUT_NAME "GrandMPPlayerBootstrap"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/remote-player-foundation"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/remote-player-foundation")
+    else()
+    add_library(grandmp_cleo_player_bootstrap MODULE EXCLUDE_FROM_ALL cleo/player_bootstrap.cpp
+        "${cleo_generated}/script_image.hpp" src/native_second_player.cpp src/remote_player_binding.cpp src/observer_network.cpp)
+    target_compile_features(grandmp_cleo_player_bootstrap PRIVATE cxx_std_20)
+    target_compile_options(grandmp_cleo_player_bootstrap PRIVATE /W4 /WX /EHsc /Oy- /JMC-)
+    target_compile_definitions(grandmp_cleo_player_bootstrap PRIVATE GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=1)
+    if(GRANDMP_ENABLE_CLEO_PLAYER_SYNC)
+        target_compile_definitions(grandmp_cleo_player_bootstrap PRIVATE
+            GRANDMP_CLEO_PLAYER_SYNC_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1
+            GRANDMP_NATIVE_INPUT_REPLAY_BUILD=1 GRANDMP_PED_SMOKE_PHYSICAL_BUILD=1)
+    endif()
+    target_include_directories(grandmp_cleo_player_bootstrap PRIVATE include "${GRANDMP_CLEO4_SDK_DIR}" "${cleo_generated}")
+    target_link_libraries(grandmp_cleo_player_bootstrap PRIVATE GrandMP::Shared "${GRANDMP_CLEO4_SDK_DIR}/CLEO.lib" bcrypt user32 ws2_32)
+    set_target_properties(grandmp_cleo_player_bootstrap PROPERTIES PREFIX "" SUFFIX ".cleo" OUTPUT_NAME "GrandMPPlayerBootstrap"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/cleo-player-bootstrap"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/cleo-player-bootstrap")
+    if(GRANDMP_ENABLE_CLEO_PLAYER_SYNC)
+        set_target_properties(grandmp_cleo_player_bootstrap PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/cleo-player-sync"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/cleo-player-sync")
+    endif()
+    endif()
+endif()
+
+# Standalone, strictly read-only Win32/x86 external capture tool for one
+# supervised Hoodlum memory snapshot. This is not an ASI and is never part of
+# the default build or loaded into the game.
+option(GRANDMP_BUILD_ALPHA09_HOODLUM_MEMORY_READER
+    "Expose isolated read-only external Hoodlum memory reader (Win32/x86)" OFF)
+if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND GRANDMP_BUILD_ALPHA09_HOODLUM_MEMORY_READER)
+    add_executable(grandmp_alpha09_hoodlum_memory_reader EXCLUDE_FROM_ALL
+        tools/alpha09_hoodlum_memory_reader.cpp)
+    target_compile_features(grandmp_alpha09_hoodlum_memory_reader PRIVATE cxx_std_20)
+    target_compile_options(grandmp_alpha09_hoodlum_memory_reader PRIVATE /W4 /WX /EHsc /JMC-)
+    target_link_options(grandmp_alpha09_hoodlum_memory_reader PRIVATE /INCREMENTAL:NO)
+    target_link_libraries(grandmp_alpha09_hoodlum_memory_reader PRIVATE bcrypt psapi)
+    set_target_properties(grandmp_alpha09_hoodlum_memory_reader PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreadedDebug"
+        OUTPUT_NAME "GrandMPAlpha09HoodlumMemoryReader"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/alpha09-hoodlum-memory-reader/$<CONFIG>")
+endif()
+
 # Own remote CPlayerPed registry/context scope, CLOSED static library only.
 # No ASI links this target; exposing it does not authenticate a native backend.
 option(GRANDMP_BUILD_NATIVE_REMOTE_PLAYER_BINDING "Expose the closed Win32 CPlayerPed binding library (no ASI)" OFF)
@@ -39,6 +171,46 @@ if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND GRANDMP_BUILD_NATIVE_PLAYE
         OUTPUT_NAME "GrandMPNativePlayerExperimental"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-player-input"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-player-input")
+endif()
+
+# Alpha 0.9: same factory/replay, plus read-only local capture and UDP emission.
+# Independent OFF gate and isolated output; never co-install with Alpha 0.8.
+option(GRANDMP_BUILD_NATIVE_PLAYER_SYNC_EXPERIMENTAL "Expose isolated bidirectional local-input player ASI" OFF)
+option(GRANDMP_ENABLE_BACKGROUND_GAMEPLAY "Enable authenticated background gameplay in the Alpha 0.9 sync ASI only" OFF)
+option(GRANDMP_ENABLE_BOOTSTRAP_DIAGNOSTIC "Expose value-only bootstrap evidence in the isolated sync ASI" OFF)
+if(GRANDMP_ENABLE_BOOTSTRAP_DIAGNOSTIC AND NOT GRANDMP_BUILD_NATIVE_PLAYER_SYNC_EXPERIMENTAL)
+    message(FATAL_ERROR "Bootstrap diagnostics require the isolated native player sync target")
+endif()
+if(GRANDMP_ENABLE_BACKGROUND_GAMEPLAY AND NOT GRANDMP_BUILD_NATIVE_PLAYER_SYNC_EXPERIMENTAL)
+    message(FATAL_ERROR "Background gameplay requires the isolated native player sync target")
+endif()
+if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND GRANDMP_BUILD_NATIVE_PLAYER_SYNC_EXPERIMENTAL)
+    set(native_sync_def tools/NativePlayerSyncExperimental.def)
+    if(GRANDMP_ENABLE_BOOTSTRAP_DIAGNOSTIC)
+        set(native_sync_def tools/NativePlayerSyncBootstrapDiagnostic.def)
+    endif()
+    add_library(grandmp_native_player_sync_experimental MODULE EXCLUDE_FROM_ALL
+        tools/ped_smoke.cpp ${native_sync_def}
+        src/native_second_player.cpp src/remote_player_binding.cpp src/observer_network.cpp)
+    target_compile_features(grandmp_native_player_sync_experimental PRIVATE cxx_std_20)
+    target_include_directories(grandmp_native_player_sync_experimental PRIVATE include)
+    target_compile_options(grandmp_native_player_sync_experimental PRIVATE /JMC- /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_native_player_sync_experimental PRIVATE
+        GRANDMP_CPLAYER_VARIANT=1 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=1
+        GRANDMP_PED_SMOKE_PHYSICAL_BUILD=1 GRANDMP_NATIVE_INPUT_REPLAY_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1)
+    if(GRANDMP_ENABLE_BACKGROUND_GAMEPLAY)
+        target_compile_definitions(grandmp_native_player_sync_experimental PRIVATE GRANDMP_BACKGROUND_GAMEPLAY_BUILD=1)
+    endif()
+    if(GRANDMP_ENABLE_BOOTSTRAP_DIAGNOSTIC)
+        target_compile_definitions(grandmp_native_player_sync_experimental PRIVATE GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD=1)
+    endif()
+    target_link_libraries(grandmp_native_player_sync_experimental PRIVATE GrandMP::Shared grandmp_windows_detection bcrypt user32 ws2_32)
+    target_link_options(grandmp_native_player_sync_experimental PRIVATE /INCREMENTAL:NO
+        "/MAP:${CMAKE_CURRENT_BINARY_DIR}/native-player-sync/$<CONFIG>/GrandMPNativePlayerSyncExperimental.map")
+    set_target_properties(grandmp_native_player_sync_experimental PROPERTIES PREFIX "" SUFFIX ".asi"
+        OUTPUT_NAME "GrandMPNativePlayerSyncExperimental"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-player-sync"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-player-sync")
 endif()
 
 # Slot-1-only candidate. This option exposes a CLOSED static library, never an ASI.

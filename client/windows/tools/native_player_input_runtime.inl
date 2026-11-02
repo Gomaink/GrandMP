@@ -16,11 +16,15 @@ bool inputCodeMatches() noexcept {
         ps::CodeRegion{0x6859A0,0x18FC},ps::CodeRegion{0x50BFF0,0x42},
         ps::CodeRegion{0x53CBE0,0x84}};
     for (const auto region:windows) {
+#if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
+        if (!inputWindowMatches(region)) return false;
+#else
         const auto* expected=diskBytes(region.address,region.size);
         std::array<std::byte,0x1900> bytes{};ps::CodeIdentityFailure failure{};
         if (!expected || !factoryPage(region.address,region.size,failure) ||
             !ps::identityRead(failure,region.address,bytes.data(),region.size) ||
             std::memcmp(bytes.data(),expected,region.size)) return false;
+#endif
     }
     return true;
 }
@@ -163,11 +167,22 @@ void inputFinish(void* value) noexcept {
         inputNotice=InputNotice::refused;runtimeDisabled.store(true);
     }
 }
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+void inputPassthrough(void* value) {
+    auto& invocation=*static_cast<InputInvocation*>(value);
+    inputOriginalAttempted=true;
+    reinterpret_cast<void(__thiscall*)(void*)>(ni::original)(invocation.ped);
+    invocation.complete=true;
+}
+#endif
 __declspec(noinline) void __fastcall inputControl(void* ped,void*) {
     const auto caller=static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(_ReturnAddress()));
-    // Foreign/local calls have no reads of the entity and no pad/global changes.
+    // Alpha 0.8 retains its direct foreign/local passthrough. Alpha 0.9 proves
+    // slot identities below; neither path changes local pad/focus/camera.
     if (GetCurrentThreadId()!=gameThread || !nativeBinding ||
+#if !defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) || GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD != 1
         reinterpret_cast<std::uintptr_t>(ped)!=nativeBinding->entityAddress() ||
+#endif
         !inputHook.installed() || runtimeDisabled.load()) {
         reinterpret_cast<void(__thiscall*)(void*)>(ni::original)(ped);return;
     }
@@ -179,6 +194,22 @@ __declspec(noinline) void __fastcall inputControl(void* ped,void*) {
     }
     inputActive=true;inputOriginalAttempted=false;inputRestoreFailed=false;inputRecord=nullptr;
     inputPed=static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(ped));
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+    // Alpha 0.9 only: the same HookCell now has explicit authenticated routing.
+    // This is a control-phase read scope, NEVER permission to run the factory.
+    nf::LocalIdentity local{};
+    const auto localPed=nativeApi && nativeApi->localIdentity(local,np::Phase::original_process_control) ? local.ped : 0;
+    const auto remotePed=nativeBinding->entityAddress();
+    const bool remoteKnown=nativeBinding->authenticatesDispatchEntity(remotePed,inputApi);
+    const auto target=ni::classifyDispatch(inputPed,localPed,remoteKnown ? remotePed : 0);
+    if (target!=ni::DispatchTarget::remote_player) {
+        InputInvocation invocation{ped,target==ni::DispatchTarget::unproven ? np::Result::ownership_lost : np::Result::processed};
+        // Even an unproven target keeps the engine's own original dispatch once;
+        // no remote controls/pose/lifecycle writes. Finally closes the scope on
+        // exceptions; unproven identity also disables subsequent GrandMP work.
+        np::withFinally(inputPassthrough,inputFinish,&invocation);return;
+    }
+#endif
     ++inputSerial;InputInvocation invocation{ped};
     np::withFinally(inputInvoke,inputFinish,&invocation);
 }
@@ -186,11 +217,30 @@ std::uint32_t inputHookAddress() noexcept {
     return static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&inputControl));
 }
 bool installInputHook() noexcept {
+#if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
+    // Same short-circuit order and same checks as below. Observe the FIRST
+    // failing predicate; never call a refused guard a second time for logging.
+    diagnosingInputInstall=true;
+    const char* refusal=nullptr;
+    if(!ni::executionApproved)refusal="input_hook.guard.execution";
+    else if(!nativeContext(nullptr))refusal="input_hook.guard.context";
+    else if(!nativeReady(nullptr))refusal="input_hook.guard.ready";
+    else if(!inputCodeMatches())refusal="input_hook.guard.code";
+    else if(!inputHook.install(reinterpret_cast<std::uint32_t*>(ni::cell),ni::original,inputHookAddress(),
+        reinterpret_cast<void*>(0x400000),ni::CellPage::cleo_writable_rdata))refusal="input_hook.guard.cell";
+    diagnosingInputInstall=false;
+    if(refusal){inputInstallRefused(refusal);writeLog("failed","input_hook_install_terminal_no_retry");return false;}
+#else
     if (!ni::executionApproved || !nativeContext(nullptr) || !nativeReady(nullptr) || !inputCodeMatches() ||
         !inputHook.install(reinterpret_cast<std::uint32_t*>(ni::cell),ni::original,inputHookAddress(),
-            reinterpret_cast<void*>(0x400000))) {
+            reinterpret_cast<void*>(0x400000)
+#if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
+            ,ni::CellPage::cleo_writable_rdata
+#endif
+            )) {
         writeLog("failed","input_hook_install_terminal_no_retry");return false;
     }
+#endif
     inputNotice=InputNotice::installed;writeLog("waiting","input_hook_installed_slot28_original_thiscall_pad1_only");return true;
 }
 void inputReport() noexcept {

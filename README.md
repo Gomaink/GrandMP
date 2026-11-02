@@ -29,11 +29,16 @@ The goal is a maintainable foundation for multiplayer features. GrandMP is **not
 | UDP-driven remote PED spawn and despawn | Physically validated (Alpha 0.6) |
 | Network-driven relative PED walking | Physically validated (Alpha 0.7 FU6); retained as a separate legacy experiment |
 | Persistent second CPlayerPed with remote on-foot input | Physically validated (Alpha 0.8, October 22, 2026): walk forward, move laterally, stop, then remove on disconnect |
-| Two real GTA clients synchronizing with each other | Not validated; the remote source is currently a synthetic client |
+| Independent pool-owned CPlayerPed native control | Physically validated (Alpha 0.11.2, November 2, 2026): walk, change direction and stop from local deterministic controls; lifecycle/removal pending |
+| Two real GTA clients synchronizing with each other | Not validated; the current independent-player proof uses local deterministic input |
 | Snapshot-based physical reconciliation | Not enabled |
 | General-purpose playable multiplayer | Not implemented |
 
 These statuses refer to **limited, isolated tests**, not production-ready features. The Alpha 0.8 operator also confirmed successful restoration of both original ASIs. See [Current status](docs/STATUS.md), [Changelog](CHANGELOG.md) and [Roadmap](docs/ROADMAP.md).
+
+The [Alpha 0.9 candidate](docs/real-client-synchronization.md) connects read-only local control capture to the same UDP/replay pipeline. Its bidirectional transport is tested offline; two-GTA gameplay remains unvalidated and its independent physical build gate is OFF.
+
+The [Alpha 0.11.2 closeout](docs/alpha-0.11.2-closeout.md) validates native control of an independent player without cooperative slot registration. Alpha 0.12 will prioritize safe removal and lifecycle before reconnecting UDP to this backend. It is a single-GTA proof, not two-client multiplayer validation.
 
 ## Architecture
 

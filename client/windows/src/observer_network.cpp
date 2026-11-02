@@ -28,20 +28,22 @@ constexpr std::uint64_t snapshotIntervalMs = 3000;
     return static_cast<SOCKET>(value);
 }
 
-[[nodiscard]] sockaddr_in serverAddress(std::uint16_t port) noexcept {
+[[nodiscard]] sockaddr_in serverAddress(core::Ipv4Endpoint endpoint) noexcept {
     sockaddr_in address{};
     address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(endpoint.port);
+    const auto& ip=endpoint.address;
+    address.sin_addr.s_addr = htonl((std::uint32_t{ip[0]}<<24)|(std::uint32_t{ip[1]}<<16)|
+        (std::uint32_t{ip[2]}<<8)|ip[3]);
     return address;
 }
 
-[[nodiscard]] bool sendPacket(SOCKET socket, std::uint16_t port,
+[[nodiscard]] bool sendPacket(SOCKET socket, core::Ipv4Endpoint endpoint,
                               const protocol::Message& message) noexcept {
     try {
         const auto packet = protocol::encode(message);
         if (!packet) return false;
-        const sockaddr_in address = serverAddress(port);
+        const sockaddr_in address = serverAddress(endpoint);
         const int sent = sendto(socket, reinterpret_cast<const char*>(packet->data()),
                                 static_cast<int>(packet->size()), 0,
                                 reinterpret_cast<const sockaddr*>(&address), sizeof(address));
@@ -69,6 +71,16 @@ bool parseLoopbackEndpoint(std::wstring_view address, std::uint16_t& port) noexc
 
 ObserverNetwork::~ObserverNetwork() { stop(); }
 
+bool parseLanEndpoint(std::wstring_view text,core::Ipv4Endpoint& endpoint) noexcept {
+    std::array<char,32> ascii{};
+    if(text.empty() || text.size()>=ascii.size()) return false;
+    for(std::size_t i=0;i<text.size();++i) {
+        if(static_cast<std::uint32_t>(text[i])>127) return false;
+        ascii[i]=static_cast<char>(text[i]);
+    }
+    return core::parseLabEndpoint(std::string_view(ascii.data(),text.size()),endpoint);
+}
+
 void ObserverNetwork::resetRemoteScene(core::RemoteEndReason reason) noexcept {
     if (playerController_) playerController_->beginSession(sessionId_,reason);
     if (sceneSink_) {
@@ -93,7 +105,11 @@ void ObserverNetwork::setRemoteSceneSink(core::IRemotePlayerSceneSink* sink) noe
 
 
 bool ObserverNetwork::start(std::uint16_t port) noexcept {
-    if (winsockStarted_ || port == 0) return false;
+    return start(core::Ipv4Endpoint{core::loopbackAddress,port});
+}
+
+bool ObserverNetwork::start(core::Ipv4Endpoint endpoint) noexcept {
+    if (winsockStarted_ || !core::validLabEndpoint(endpoint)) return false;
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return false;
     winsockStarted_ = true;
@@ -108,7 +124,7 @@ bool ObserverNetwork::start(std::uint16_t port) noexcept {
         return false;
     }
     if (nonce_ == 0) nonce_ = 1;
-    port_ = port;
+    endpoint_ = endpoint;
     return true;
 }
 
@@ -119,7 +135,7 @@ bool ObserverNetwork::beginRemoteScenePreview() noexcept {
 }
 
 void ObserverNetwork::sendHello() noexcept {
-    (void)sendPacket(nativeSocket(socket_), port_, protocol::Hello{nonce_});
+    (void)sendPacket(nativeSocket(socket_), endpoint_, protocol::Hello{nonce_});
     lastHelloMs_ = GetTickCount64();  // Limita retries também se não há servidor.
 }
 
@@ -134,9 +150,10 @@ void ObserverNetwork::receivePackets() noexcept {
                                       static_cast<int>(bytes.size()), 0,
                                       reinterpret_cast<sockaddr*>(&sender), &senderSize);
         if (received == SOCKET_ERROR) return;
+        const auto expected=serverAddress(endpoint_);
         if (senderSize != sizeof(sender) || sender.sin_family != AF_INET ||
-            sender.sin_addr.s_addr != htonl(INADDR_LOOPBACK) ||
-            sender.sin_port != htons(port_)) continue;
+            sender.sin_addr.s_addr != expected.sin_addr.s_addr ||
+            sender.sin_port != expected.sin_port) continue;
         const auto decoded = protocol::decode(std::span<const std::uint8_t>(
             bytes.data(), static_cast<std::size_t>(received)));
         if (decoded.status != protocol::DecodeStatus::ok || !decoded.message) continue;
@@ -189,8 +206,8 @@ void ObserverNetwork::receivePackets() noexcept {
 
 void ObserverNetwork::sendSnapshotRequest() noexcept {
     if (sessionId_ == 0) return;
-    if (playerController_) (void)sendPacket(nativeSocket(socket_),port_,protocol::OnFootSubscribe{sessionId_});
-    (void)sendPacket(nativeSocket(socket_), port_, protocol::SnapshotRequest{sessionId_});
+    if (playerController_) (void)sendPacket(nativeSocket(socket_),endpoint_,protocol::OnFootSubscribe{sessionId_});
+    (void)sendPacket(nativeSocket(socket_), endpoint_, protocol::SnapshotRequest{sessionId_});
     lastSnapshotMs_ = GetTickCount64();
 }
 
@@ -198,9 +215,17 @@ bool ObserverNetwork::sendOnFoot(const core::OnFootState& sample) noexcept {
     if (!playerController_ || !sessionId_ || !core::validOnFoot(sample) ||
         sequence_==std::numeric_limits<std::uint32_t>::max()) return false;
     const auto next=sequence_+1;
-    if (!sendPacket(nativeSocket(socket_),port_,protocol::PlayerOnFoot{sessionId_,next,sample})) return false;
+    if (!sendPacket(nativeSocket(socket_),endpoint_,protocol::PlayerOnFoot{sessionId_,next,sample})) return false;
     sequence_=next;
     return true;
+}
+
+bool ObserverNetwork::tickLocal(core::LocalPlayerSnapshots& snapshots) noexcept {
+    tick(std::nullopt);
+    snapshots.session(sessionId_);
+    core::LocalPlayerSnapshots::Snapshot value{};
+    // Receive/roster work may take time: freshness is checked AFTER that work.
+    return !snapshots.take(GetTickCount64(),value) || sendOnFoot(value.state);
 }
 
 void ObserverNetwork::sendPosition(const Coordinates& position) noexcept {
@@ -210,7 +235,7 @@ void ObserverNetwork::sendPosition(const Coordinates& position) noexcept {
         return;
     }
     const std::uint32_t nextSequence = sequence_ + 1;
-    if (sendPacket(nativeSocket(socket_), port_, protocol::PlayerPosition{
+    if (sendPacket(nativeSocket(socket_), endpoint_, protocol::PlayerPosition{
             sessionId_, nextSequence, position.x, position.y, position.z})) {
         sequence_ = nextSequence;
     }
@@ -259,7 +284,7 @@ void ObserverNetwork::tick(std::optional<Coordinates> position) noexcept {
 void ObserverNetwork::stop() noexcept {
     if (socket_ != static_cast<std::uintptr_t>(INVALID_SOCKET)) {
         if (sessionId_ != 0)
-            (void)sendPacket(nativeSocket(socket_), port_, protocol::Disconnect{sessionId_});
+            (void)sendPacket(nativeSocket(socket_), endpoint_, protocol::Disconnect{sessionId_});
         closesocket(nativeSocket(socket_));
         socket_ = static_cast<std::uintptr_t>(INVALID_SOCKET);
     }

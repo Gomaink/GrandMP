@@ -1,6 +1,6 @@
 # GrandMP roadmap
 
-Updated **October 22, 2026**. Milestones describe demonstrated behavior; future items have no promised dates. This replaces the earlier proposed version-to-feature schedule. In particular, Alpha 0.8 closes native remote input replay, **not** a SA-MP API compatibility release.
+Updated **November 2, 2026**. Milestones describe demonstrated behavior; future items have no promised dates. Alpha 0.8 closed the earlier cooperative replay experiment. Alpha 0.11.2 closes a single-GTA independent-player control proof, **not** playable two-client multiplayer or SA-MP API compatibility.
 
 ## Completed experimental milestones
 
@@ -11,15 +11,16 @@ Updated **October 22, 2026**. Milestones describe demonstrated behavior; future 
 | Alpha 0.6 | UDP remote join creates a PED; leave removes it | One synthetic remote, loopback |
 | Alpha 0.7 FU6 | One relative UDP-commanded native walk with observed arrival | Single task attempt; retained as legacy |
 | Alpha 0.8 | Persistent CPlayerPed slot 1, remote input replay, forward/lateral walking, stop and disconnect removal | Operator-confirmed October 22, 2026; synthetic source and exact Hoodlum build |
+| Alpha 0.11.2 | Independent pool-owned CPlayerPed walks, changes direction and stops; 339 consecutive native dispatches | Operator-confirmed November 2, 2026; deterministic local source; independent removal and UDP integration pending |
 
 The portable continuous-task coordinator and pose model were tested offline. They do not represent physically enabled continuous task reassignment or pose correction. The main architecture is now **remote CPlayerPed + input replay + native processing + snapshots for future reconciliation**.
 
 ## Next functional increments
 
-1. **Real local input source.** Capture and transmit the supported on-foot controls from a real client without disturbing local input. Preserve the existing controller, generation and lifecycle contracts. Completion requires a real source, not another synthetic demonstration.
-2. **Two real GTA clients.** Demonstrate both players seeing each other walk, turn, stop and leave. Keep initial connectivity explicit and constrained; LAN/public access requires a separate networking/security scope. Test loss, stale input, reconnect and local-player independence before claiming general synchronization.
+1. **Alpha 0.12 — authenticated independent lifecycle.** Prove safe removal after stop, then during walking, using the current factory/Binding and admitted CLEO phase. Verify native cleanup and late-dispatch refusal; keep partial cleanup, ownership loss and restoration failures fail-closed. No UDP integration until this milestone passes. See the [scoped plan](alpha-0.11.2-closeout.md#alpha-012-plan--lifecycle-before-udp).
+2. **Real capture and two-client integration.** Reuse existing local capture, UDP relay and Controller work with the accepted independent backend. Demonstrate both players seeing each other walk, turn, stop and leave. Initial tests may use two computers. Preserve identity, generation, timeout, disconnect removal and local-player independence; no automatic retries or aggressive pose correction.
 3. **Snapshot reconciliation.** Establish a verified native correction contract and bounded policy for divergence. Do not silently introduce position/matrix/velocity writes or treat simulated postconditions as engine guarantees. Measure results before choosing correction thresholds.
-4. **More remote players.** Authenticate capacity, allocation, per-player control contexts and cleanup before expanding beyond the original cooperative slot. Slot arithmetic from another project is not evidence of native capacity.
+4. **More remote players.** Authenticate pool capacity, per-player control contexts, resources and cleanup beyond the single independent remote. The available pad/context contract is not automatically expandable; slot arithmetic from another project is not capacity evidence.
 
 Each increment needs focused regressions, explicit supported executable/ABI, failure behavior, separate physical approval and reversible installation. A native guard failure blocks the affected operation; retries or unknown entity deletion are not substitutes for a contract.
 

@@ -23,6 +23,50 @@ enum class Reason { none, closed, context, readiness, occupied, read_failed, poo
     pool_full, local_identity, construction_unproven, state, identity, reference,
     world_link, local_changed, factory_result_unknown, cleanup_unknown, placement_refused };
 
+// Native-thread-only value snapshots. No PED/task/module address is retained.
+enum class CreateFailure { none, preparation, protection_before, group_selection,
+    old_group_read, spawn_refused, spawn_nonfinite, group_seed, slot_read, slot_empty,
+    group_ownership, default_task, protection_after, protected_state_changed, execution_closed };
+enum class CreateSlot { not_observed, unreadable, empty, present };
+enum class CreateResultFailure { none, slot_read, slot_empty, incomplete_with_ped };
+struct NativeCreateObservation {
+    // started, group_seeded, setup_entered, setup_returned, complete
+    enum : unsigned { started=1, group_seeded=2, setup_entered=4, setup_returned=8, complete=16 };
+    unsigned flags=0,changedProtection=0;
+    CreateFailure failure=CreateFailure::none;
+    CreateSlot slot=CreateSlot::not_observed;
+    ps::MemoryRead failedRead{};
+    std::size_t requested=0;
+    bool readFailure=false;
+    void fail(CreateFailure value) noexcept { if(failure==CreateFailure::none)failure=value; }
+};
+struct ApiCreateObservation {
+    // command_entered, command_returned, command_complete
+    unsigned flags=0;
+    CreateSlot slot=CreateSlot::not_observed;
+    CreateResultFailure failure=CreateResultFailure::none;
+    ps::MemoryRead slotRead{};
+};
+inline const char* createFailureName(CreateFailure value) noexcept {
+    switch(value){
+    case CreateFailure::preparation:return "factory.create.preparation";
+    case CreateFailure::protection_before:return "factory.create.protection_before";
+    case CreateFailure::group_selection:return "factory.create.group_selection";
+    case CreateFailure::old_group_read:return "factory.create.old_group_read";
+    case CreateFailure::spawn_refused:return "factory.create.spawn_refused";
+    case CreateFailure::spawn_nonfinite:return "factory.create.spawn_nonfinite";
+    case CreateFailure::group_seed:return "factory.create.group_seed";
+    case CreateFailure::slot_read:return "factory.create.slot_read";
+    case CreateFailure::slot_empty:return "factory.create.slot_empty";
+    case CreateFailure::group_ownership:return "factory.create.group_ownership";
+    case CreateFailure::default_task:return "factory.create.default_task_post_setup";
+    case CreateFailure::protection_after:return "factory.create.protection_after";
+    case CreateFailure::protected_state_changed:return "factory.create.protected_state_changed";
+    case CreateFailure::execution_closed:return "factory.create.execution_closed";
+    default:return "factory.create.no_failure_observed";
+    }
+}
+
 // Existing host must lend its admitted pre-world context, readiness/code/PIN
 // proof. This interface never makes a new hook or infers phase from a clock.
 class Access {
@@ -45,6 +89,11 @@ public:
 };
 
 struct Pool { std::uint32_t objects=0,flags=0; std::int32_t size=0,cursor=0; bool operator==(const Pool&) const=default; };
+struct LocalIdentity {
+    std::uint32_t ped=0,objects=0,flags=0;
+    std::int32_t handle=0,size=0;
+    bool operator==(const LocalIdentity&) const=default;
+};
 struct LocalImage {
     std::array<std::byte,infoStride> info{};
     std::array<std::byte,padStride*2> pads{};
@@ -61,6 +110,23 @@ public:
     explicit Api(Access& access,std::thread::id owner) noexcept : access_(access),owner_(owner) {}
     Construction construction() const noexcept { return construction_; }
     Reason reason() const noexcept { return reason_; } // Native thread only, values only.
+    ApiCreateObservation creationObservation() const noexcept { return creationObservation_; }
+    // Read-only slot-0 capture. Reuse the exact pool/tag and readiness checks;
+    // this does not register a reference or change the remote factory state.
+    bool localIdentity(LocalIdentity& result,Phase phase=Phase::pre_world) const noexcept {
+        result={};Pool p;std::uint32_t ped=0,vt=0,data=0,type=~0u;
+        std::uint8_t focus=1;std::int32_t handle=0;
+        // Original-control permission authenticates reads only. Factory/removal
+        // still require allowed()/pre_world and cannot borrow this scope.
+        const bool admitted=phase==Phase::pre_world ? allowed() :
+            phase==Phase::original_process_control && access_.controlContext() && allowedIdentity();
+        if (!admitted || !read(ps::playerIndex,focus) || focus || !pool(p) ||
+            !read(slot0,ped) || !ped || !poolPed(ped,p,handle) ||
+            !read(ped,vt) || vt!=ps::playerVtable ||
+            !read(ped+playerData,data) || data!=slot0+4 ||
+            !read(ped+pedType,type) || type!=0) return false;
+        result={ped,p.objects,p.flags,handle,p.size};return true;
+    }
     bool context(Phase phase) const noexcept override {
         return phase==Phase::pre_world && owner_==std::this_thread::get_id() && access_.context();
     }
@@ -98,14 +164,26 @@ public:
         if (!localUnchanged() || !read(slot1,occupant)) return Creation::indeterminate;
         if (occupant) { refuse(Reason::occupied);return Creation::indeterminate; }
         // From here, failure remains terminal, including exceptions. No retries.
+        const bool observing=creationObservation_.flags==0;
+        if(observing)creationObservation_.flags=1;
         const bool commandComplete=access_.createPlayerOne();
+        if(observing)creationObservation_.flags|=2u|(commandComplete ? 4u : 0u);
         std::uint32_t ped=0;
-        if (!read(slot1,ped) || !ped) { refuse(Reason::factory_result_unknown);return Creation::indeterminate; }
+        ps::MemoryRead resultRead{};
+        const bool slotRead=read(slot1,ped,&resultRead);
+        if(observing){creationObservation_.slotRead=resultRead;creationObservation_.slot=!slotRead ? CreateSlot::unreadable : !ped ? CreateSlot::empty : CreateSlot::present;}
+        if (!slotRead || !ped) {
+            if(observing)creationObservation_.failure=!slotRead ? CreateResultFailure::slot_read : CreateResultFailure::slot_empty;
+            refuse(Reason::factory_result_unknown);return Creation::indeterminate;
+        }
         record.entity.ped=ped;record.reference=ped; // Retain result BEFORE any further probe/call.
         record.entity.slot=1;record.entity.playerData=data1;record.entity.pad=pad1;
         // Setup can publish a PED before later stages fail. Retaining
         // that value is NOT ownership proof and must not trigger cleanup.
-        if (!commandComplete) { refuse(Reason::factory_result_unknown);return Creation::indeterminate; }
+        if (!commandComplete) {
+            if(observing)creationObservation_.failure=CreateResultFailure::incomplete_with_ped;
+            refuse(Reason::factory_result_unknown);return Creation::indeterminate;
+        }
         if (!localUnchanged() || !correlate(record,false,true)) return Creation::indeterminate;
         // No native GetPed/GetPedRef call: bounded pool arithmetic authenticates the tag.
         if (!access_.registerCell(ped,&record.reference) || record.reference!=ped ||
@@ -166,8 +244,10 @@ private:
         if (!access_.executorEnabled()) return refuse(Reason::closed);
         return access_.ready() || refuse(Reason::readiness);
     }
-    template<class T> bool read(std::uint32_t at,T& value) const noexcept {
-        return access_.read(at,&value,sizeof(value)).complete(sizeof(value)) || refuse(Reason::read_failed);
+    template<class T> bool read(std::uint32_t at,T& value,ps::MemoryRead* observed=nullptr) const noexcept {
+        const auto result=access_.read(at,&value,sizeof(value));
+        if(observed)*observed=result;
+        return result.complete(sizeof(value)) || refuse(Reason::read_failed);
     }
     bool localImage(LocalImage& image) const noexcept {
         return read(slot0,image.info) && read(pad0,image.pads) && read(ps::playerIndex,image.focus);
@@ -262,6 +342,7 @@ private:
     Construction construction_=Construction::not_started;
     bool removeReturned_=false;
     mutable Reason reason_=Reason::none;
+    ApiCreateObservation creationObservation_{};
 };
 
 // Uses the existing strict admission primitives supplied by the native host;
@@ -289,7 +370,18 @@ public:
     bool removeOne() override;
     bool finishRemoval(const Record&) override;
     bool onFootDefaultOwned(const Record&) const noexcept;
+    NativeCreateObservation creationObservation() const noexcept { return creationObservation_; }
 private:
+    ps::MemoryRead observeRead(ps::MemoryRead result,std::size_t requested) noexcept {
+        if(observingCreation_ && !result.complete(requested) && !creationObservation_.readFailure){
+            creationObservation_.readFailure=true;creationObservation_.failedRead=result;creationObservation_.requested=requested;
+        }
+        return result;
+    }
+    bool creationRefused(CreateFailure value) noexcept {
+        if(observingCreation_)creationObservation_.fail(value);
+        return false;
+    }
     template<class T> bool get(std::uint32_t at,T& value) const noexcept {
         return const_cast<WindowsAccess*>(this)->read(at,&value,sizeof(value)).complete(sizeof(value));
     }
@@ -303,5 +395,7 @@ private:
     unsigned group_=8,oldGroup_=0;
     bool attempted_=false,seeded_=false,finished_=false;
     std::uint32_t ownPed_=0;
+    NativeCreateObservation creationObservation_{};
+    bool observingCreation_=false;
 };
 } // namespace grandmp::windows::remote_player_binding::second_player

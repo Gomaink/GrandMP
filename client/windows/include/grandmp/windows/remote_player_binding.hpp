@@ -25,7 +25,7 @@ enum class Result { closed, context_refused, no_input, occupied, stale, blocked_
 struct Identity {
     std::uint32_t ped = 0, playerData = 0, pad = 0;
     std::int32_t handle = -1;
-    unsigned slot = std::numeric_limits<unsigned>::max();
+    unsigned slot = std::numeric_limits<unsigned>::max(); // No PlayerInfo slot for pool-owned backends.
     bool operator==(const Identity&) const = default;
 };
 struct Record {
@@ -44,6 +44,24 @@ struct Controls {
     OnFootPadStates pad{}; // Prepared values; never automatically written into GTA.
 };
 enum class InputDisposition { fresh, neutral_missing, neutral_timeout, neutral_stale, neutral_contended };
+// Optional value-only observation. Marks existing calls; never probes the engine.
+enum class ProcessStep : unsigned { none, gate, owner, context, reentrancy, live, serial,
+    replay, identity, dispatch, ownership, capture, capture_size, pad, apply,
+    before_original, original, restore, after_original, complete };
+struct ProcessObservation {
+    ProcessStep body = ProcessStep::none, primary = ProcessStep::none;
+    std::uint32_t entered = 0, passed = 0;
+    bool cppException = false;
+    void enter(ProcessStep step) noexcept {
+        entered |= std::uint32_t{1} << static_cast<unsigned>(step);
+        if (step!=ProcessStep::restore) body=step;
+    }
+    void finish(ProcessStep step,bool okay) noexcept {
+        if (okay) passed |= std::uint32_t{1} << static_cast<unsigned>(step);
+        else if (step!=ProcessStep::restore && primary==ProcessStep::none) primary=step;
+    }
+    bool check(ProcessStep step,bool okay) noexcept { enter(step);finish(step,okay);return okay; }
+};
 struct ContextImage {
     // Backend authenticates the full layout and every required global. Not a
     // copied CPad definition; unproven camera/aim state cannot be omitted.
@@ -58,8 +76,10 @@ public:
     virtual ~Api() = default;
     // No engine reads in context(). Wrong phase/thread must stop before probes.
     virtual bool context(Phase) const noexcept = 0;
-    // Requires a reserved additional slot with proven capacity, resident code,
-    // admitted executable/live code, allocator/lifecycle ABI and no alias to CJ.
+    // Requires proven backend-owned storage/capacity, resident code, admitted
+    // executable/live code, allocator/lifecycle ABI and no alias to CJ. Legacy
+    // backends additionally authenticate their PlayerInfo slot; it is not a
+    // requirement for independent pool-owned players.
     virtual bool factoryProven() const noexcept = 0;
     virtual bool removalProven() const noexcept = 0;
     virtual bool replayProven() const noexcept = 0;
@@ -69,11 +89,13 @@ public:
     // supplies its own admitted spawn conditions, independently of UDP XYZ.
     virtual Creation create(core::RemotePlayerKey, Record&) = 0;
     // Must authenticate key/session, reference node, tagged pool handle,
-    // PlayerInfo slot, player-data/pad identities and ownership anew. Historical
+    // backend-owned player-data/pad identities and ownership anew (including a
+    // PlayerInfo slot only for slot-backed implementations). Historical
     // addresses are only comparisons, never authority to dereference memory.
     virtual bool authenticate(const Record&) noexcept = 0;
     virtual Removal remove(Record&) = 0;
-    // Requires returned destruction + released slot/tagged pool handle AND old
+    // Requires returned destruction + released tagged pool handle (and slot,
+    // where the backend uses one) AND old
     // registered reference unlinked. reference==0 alone never permits reuse.
     virtual bool removed(const Record& before, const Record& after) noexcept = 0;
     // Proof of this exact original dispatch, its ABI, exclusive context writers
@@ -105,6 +127,15 @@ public:
     core::RemotePlayerKey key() const noexcept { return record_.key; }
     // Comparison only on the native owner thread; never exported to a worker.
     std::uint32_t entityAddress() const noexcept { return record_.entity.ped; }
+    std::int32_t entityHandle() const noexcept { return record_.entity.handle; } // Native-owner value, never a pointer.
+    // Read-only routing proof for the existing original-control wrapper. A
+    // historical address alone must never select remote input or pose writes.
+    bool authenticatesDispatchEntity(std::uint32_t ped, Api& api) noexcept {
+        if constexpr (!Enabled) return false;
+        return owner() && !busy_ && state_==State::live && ped &&
+            ped==record_.entity.ped && record_.key.player && record_.key.generation &&
+            api.context(Phase::original_process_control) && api.authenticate(record_);
+    }
     const char* retirementReason() const noexcept { return retirementReason_; }
     InputDisposition inputDisposition() const noexcept { return inputDisposition_; }
 
@@ -173,15 +204,25 @@ public:
     // Only an authenticated original CPlayerPed dispatch may enter. This is not
     // called by consume()/pre_world and installs no hook or substitute scheduler.
     Result process(core::RemotePlayerController& controller, core::RemoteRoster::Time now,
-                   const Dispatch& dispatch, Api& api) {
-        if constexpr (!Enabled) return Result::closed;
-        if (!owner() || !api.context(Phase::original_process_control)) return Result::context_refused;
-        if (busy_) return Result::reentrant;
-        if (state_!=State::live) return Result::indeterminate;
-        if (!dispatch.serial || dispatch.serial<=lastDispatch_) return Result::duplicate;
-        if (!api.replayProven()) return Result::blocked_contract;
-        if (dispatch.key!=record_.key || dispatch.ped!=record_.entity.ped ||
-            !api.dispatch(record_,dispatch) || !api.authenticate(record_)) {
+                   const Dispatch& dispatch, Api& api, ProcessObservation* observation=nullptr) {
+        if (observation) *observation={};
+        const auto check=[observation](ProcessStep step,bool okay) noexcept {
+            return observation ? observation->check(step,okay) : okay;
+        };
+        const auto probe=[observation](ProcessStep step,auto&& call) {
+            if (observation) observation->enter(step);
+            const bool okay=call();
+            if (observation) observation->finish(step,okay);
+            return okay;
+        };
+        if constexpr (!Enabled) { check(ProcessStep::gate,false);return Result::closed; }
+        if (!check(ProcessStep::owner,owner()) || !probe(ProcessStep::context,[&]{return api.context(Phase::original_process_control);})) return Result::context_refused;
+        if (!check(ProcessStep::reentrancy,!busy_)) return Result::reentrant;
+        if (!check(ProcessStep::live,state_==State::live)) return Result::indeterminate;
+        if (!check(ProcessStep::serial,dispatch.serial && dispatch.serial>lastDispatch_)) return Result::duplicate;
+        if (!probe(ProcessStep::replay,[&]{return api.replayProven();})) return Result::blocked_contract;
+        if (!check(ProcessStep::identity,dispatch.key==record_.key && dispatch.ped==record_.entity.ped) ||
+            !probe(ProcessStep::dispatch,[&]{return api.dispatch(record_,dispatch);}) || !probe(ProcessStep::ownership,[&]{return api.authenticate(record_);})) {
             current_={};state_=State::ownership_lost;return Result::ownership_lost;
         }
         // Re-read the real controller at the ORIGINAL dispatch. Pre-world input
@@ -209,19 +250,24 @@ public:
             }
         }
         ContextImage saved;
-        if (!api.capture(saved) || !saved.used || saved.used>saved.bytes.size()) {state_=State::poisoned;return Result::context_failed;}
+        if (!probe(ProcessStep::capture,[&]{return api.capture(saved);}) || !check(ProcessStep::capture_size,saved.used && saved.used<=saved.bytes.size())) {state_=State::poisoned;return Result::context_failed;}
         busy_=true;state_=State::poisoned;lastDispatch_=dispatch.serial;
-        Invocation invocation{*this,api,saved};
+        Invocation invocation{*this,api,saved,observation};
         try { withFinally(body,restore,&invocation); }
         catch (...) { // __finally already attempted restoration; no retry.
+            if (observation) {
+                observation->cppException=true;
+                if (observation->primary==ProcessStep::none) observation->primary=observation->body;
+            }
             if (!invocation.restored) return Result::restore_failed;
             return invocation.applied ? Result::original_failed : Result::context_failed;
         }
         if (!invocation.restored) return Result::restore_failed;
         if (!invocation.applied) return Result::context_failed;
         if (!invocation.returned) return Result::original_failed;
-        if (!api.authenticate(record_)) { state_=State::ownership_lost;return Result::ownership_lost; }
+        if (!probe(ProcessStep::after_original,[&]{return api.authenticate(record_);})) { state_=State::ownership_lost;return Result::ownership_lost; }
         previous_=current_;state_=State::live;
+        check(ProcessStep::complete,true);
         return Result::processed;
     }
 private:
@@ -243,17 +289,33 @@ private:
         record_={};previous_={};sequence_=0;state_=State::retired;
         return Result::removed;
     }
-    struct Invocation { Binding& binding;Api& api;const ContextImage& saved;bool applied=false,returned=false,restored=false; };
+    struct Invocation { Binding& binding;Api& api;const ContextImage& saved;ProcessObservation* observation=nullptr;bool applied=false,returned=false,restored=false; };
     static void body(void* value) {
         auto& i=*static_cast<Invocation*>(value);auto& b=i.binding;
         Controls input{b.previous_,b.current_,b.viewHeading_};
-        if (!prepareOnFootPad(input.previous,input.current,input.pad)) return;
+        if (i.observation) i.observation->enter(ProcessStep::pad);
+        const bool prepared=prepareOnFootPad(input.previous,input.current,input.pad);
+        if (i.observation) i.observation->finish(ProcessStep::pad,prepared);
+        if (!prepared) return;
+        if (i.observation) i.observation->enter(ProcessStep::apply);
         i.applied=i.api.apply(b.record_,input);
-        if (i.applied && i.api.authenticate(b.record_)) i.returned=i.api.original(b.record_);
+        if (i.observation) i.observation->finish(ProcessStep::apply,i.applied);
+        if (i.applied) {
+            if (i.observation) i.observation->enter(ProcessStep::before_original);
+            const bool authenticated=i.api.authenticate(b.record_);
+            if (i.observation) i.observation->finish(ProcessStep::before_original,authenticated);
+            if (authenticated) {
+                if (i.observation) i.observation->enter(ProcessStep::original);
+                i.returned=i.api.original(b.record_);
+                if (i.observation) i.observation->finish(ProcessStep::original,i.returned);
+            }
+        }
     }
     static void restore(void* value) noexcept {
         auto& i=*static_cast<Invocation*>(value);
+        if (i.observation) i.observation->enter(ProcessStep::restore);
         i.restored=i.api.restore(i.saved);
+        if (i.observation) i.observation->finish(ProcessStep::restore,i.restored);
         i.binding.busy_=false; // Residency persists even if unwind escapes the caller.
     }
     std::thread::id owner_;

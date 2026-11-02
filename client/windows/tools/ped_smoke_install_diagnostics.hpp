@@ -31,6 +31,8 @@ enum class InstallFailure : std::uint32_t {
     candidate_instruction_cache_flush_failed,
     candidate_protection_restore_failed,
     candidate_post_publish_code_mismatch,
+    candidate_code_write_failed,
+    candidate_code_rollback_failed,
     unhook_failed
 };
 
@@ -87,6 +89,8 @@ constexpr const char* installFailureReason(InstallFailure failure) noexcept {
     case InstallFailure::candidate_instruction_cache_flush_failed: return "install_candidate_instruction_cache_flush_failed_module_pinned_no_engine_dispatch";
     case InstallFailure::candidate_protection_restore_failed: return "install_candidate_protection_restore_failed_module_pinned_no_engine_dispatch";
     case InstallFailure::candidate_post_publish_code_mismatch: return "install_candidate_post_publish_code_mismatch_module_pinned_no_engine_dispatch";
+    case InstallFailure::candidate_code_write_failed: return "install_candidate_code_write_failed_module_pinned_no_engine_dispatch";
+    case InstallFailure::candidate_code_rollback_failed: return "install_candidate_code_rollback_failed_module_pinned_no_engine_dispatch";
     case InstallFailure::unhook_failed: return "bootstrap_unhook_failed_module_pinned";
     }
     return "install_diagnostic_unknown_failure";

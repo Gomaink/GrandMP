@@ -15,7 +15,7 @@ void check(bool okay,const char* message) { if (!okay) throw std::runtime_error(
 struct Memory final : sp::Access {
     std::map<std::uint32_t,std::byte> bytes;
     bool admitted=true,readyFlag=true,enabled=true,construction=true,setupReturn=true;
-    bool finishReturn=true,controlOnly=false;
+    bool finishReturn=true,controlOnly=false,postCreatePartialRead=false;
     unsigned finishes=0,finishRemovals=0;
     bool finishRemoval(const rb::Record&) override { ++finishRemovals;return true; }
     bool finishPlayerOne(const rb::Record&) override { ++finishes;return finishReturn; }
@@ -56,7 +56,7 @@ struct Memory final : sp::Access {
             destination[n]=i->second;
         }
         if (at==sp::slot1 && ++slotReads==2 && occupyDuringPreflight) put(sp::slot1,std::uint32_t{0x777777});
-        return {true,at==partialAt ? size-1 : size,ERROR_SUCCESS};
+        return {true,at==partialAt || (postCreatePartialRead && setups && at==sp::slot1) ? size-1 : size,ERROR_SUCCESS};
     }
     bool createPlayerOne() override {
         ++setups;destroyed=false;
@@ -118,6 +118,96 @@ std::uint32_t commandWord(const sp::create_player::Program& p,std::size_t at) {
     return unsigned(p[at]) | (unsigned(p[at+1])<<8) | (unsigned(p[at+2])<<16) | (unsigned(p[at+3])<<24);
 }
 void run(std::string_view which) {
+    if (which=="diag_windows_closed") {
+        sp::WindowsAccess access({});
+        check(!access.createPlayerOne(),"real Windows executor refuses without admission");
+        const auto first=access.creationObservation();
+        check(first.flags==sp::NativeCreateObservation::started && first.failure==sp::CreateFailure::preparation &&
+            first.slot==sp::CreateSlot::not_observed && !first.readFailure,"preparation refusal precedes native reads and Setup");
+        check(!access.createPlayerOne() && access.creationObservation().flags==first.flags &&
+            access.creationObservation().failure==first.failure,"first observation cannot be replaced by a later call");
+        sp::NativeCreateObservation stage{};stage.fail(sp::CreateFailure::group_selection);stage.fail(sp::CreateFailure::default_task);
+        check(stage.failure==sp::CreateFailure::group_selection,"first failing stage is immutable");return;
+    }
+    if (which.starts_with("diag_")) {
+        Fixture f;
+        f.memory.emptyResult=which=="diag_true_empty" || which=="diag_false_empty";
+        f.memory.setupReturn=which!="diag_false_empty" && which!="diag_false_published";
+        f.memory.postCreatePartialRead=which=="diag_post_slot_read";
+        const bool complete=which=="diag_complete";
+        check(f.api.create(f.record.key,f.record)==(complete ? rb::Creation::complete : rb::Creation::indeterminate),
+            "diagnostics preserve the factory result");
+        const auto observation=f.api.creationObservation();
+        check(observation.flags==(f.memory.setupReturn ? 7u:3u),"entered/returned and actual bool result kept independently");
+        const auto reads=f.memory.reads;
+        for(unsigned n=0;n<32;++n)(void)f.api.creationObservation();
+        check(reads==f.memory.reads && f.memory.setups==1,"value snapshot adds no native reads or Setup calls");
+        if(complete) {
+            check(observation.slot==sp::CreateSlot::present && observation.failure==sp::CreateResultFailure::none &&
+                f.api.reason()==sp::Reason::none && f.memory.finishes==1,"success remains success, no failure fabricated");return;
+        }
+        check(f.api.reason()==sp::Reason::factory_result_unknown && f.api.construction()==sp::Construction::terminal_failure,
+            "Reason 15 and terminal construction unchanged");
+        check(f.memory.slotReads==4 && !f.memory.finishes && !f.memory.registers && !f.memory.cleans && !f.memory.removes,
+            "one existing post-call slot read; no new ownership/placement/cleanup operations");
+        if(f.memory.emptyResult) {
+            check(observation.slot==sp::CreateSlot::empty && observation.failure==sp::CreateResultFailure::slot_empty &&
+                observation.slotRead.complete(4) && !f.record.entity.ped && !f.record.reference,
+                "null slot distinguished from command bool and unreadable memory");
+        } else if(f.memory.postCreatePartialRead) {
+            check(observation.slot==sp::CreateSlot::unreadable && observation.failure==sp::CreateResultFailure::slot_read &&
+                observation.slotRead.transferred==3 && !f.record.entity.ped && !f.record.reference,
+                "partial read never proves a present PED, even if output was written");
+        } else {
+            check(which=="diag_false_published" && observation.slot==sp::CreateSlot::present &&
+                observation.failure==sp::CreateResultFailure::incomplete_with_ped && observation.slotRead.complete(4) &&
+                f.record.entity.ped==Memory::ped && f.record.reference==Memory::ped,
+                "false result with published PED is retained without ownership proof");
+        }
+        check(!f.api.authenticate(f.record) && !f.api.factoryProven() &&
+            f.api.create(f.record.key,f.record)==rb::Creation::absent && f.memory.setups==1 &&
+            !f.memory.cleans && !f.memory.removes,"diagnostic never authorizes retry or speculative cleanup");return;
+    }
+    if (which.starts_with("control_identity_")) {
+        Fixture f;sp::LocalIdentity local{};
+        f.memory.admitted=false;f.memory.controlOnly=true;
+        check(!f.api.localIdentity(local) && !f.memory.reads,"legacy default still requires pre-world");
+        if (which=="control_identity_denied") f.memory.controlOnly=false;
+        if (which=="control_identity_partial") f.memory.partialAt=Memory::flags;
+        if (which=="control_identity_thread") {
+            bool accepted=true;std::thread other([&]{accepted=f.api.localIdentity(local,rb::Phase::original_process_control);});other.join();
+            check(!accepted && !f.memory.reads,"foreign thread has no identity reads");return;
+        }
+        const bool valid=f.api.localIdentity(local,rb::Phase::original_process_control);
+        if (which=="control_identity_valid") {
+            check(valid && local.ped==Memory::cj && local.handle==1,"same slot/pool/tag/data proof in original-control scope");
+        } else {
+            check(!valid && local==sp::LocalIdentity{},"denied/partial identity is never presumed local");
+            if (which=="control_identity_denied") check(!f.memory.reads,"denied context has no memory reads");
+        }
+        const auto reads=f.memory.reads;
+        check(!f.api.factoryProven() && f.api.create(f.record.key,f.record)==rb::Creation::absent &&
+            f.api.remove(f.record)==rb::Removal::indeterminate && reads==f.memory.reads,
+            "ProcessControl never permits factory/removal or their memory probes");
+        check(!f.memory.setups && !f.memory.finishes && !f.memory.registers && !f.memory.cleans && !f.memory.removes,
+            "read-only control identity does not mutate the native lifecycle");return;
+    }
+    if (which.starts_with("local_capture_")) {
+        Fixture f;sp::LocalIdentity first{},second{};
+        if (which=="local_capture_context") {
+            f.memory.admitted=false;
+            check(!f.api.localIdentity(first) && !f.memory.reads,"no slot-0 reads without native context");return;
+        }
+        check(f.api.localIdentity(first) && first.ped==Memory::cj && first.handle==1,"local slot/pool/tag/data identity");
+        if (which=="local_capture_partial") {
+            f.memory.partialAt=sp::ps::pedPool;
+            check(!f.api.localIdentity(second),"partial identity read refused");
+        } else if (which=="local_capture_generation") {
+            f.memory.put(Memory::flags,std::uint8_t{2});
+            check(f.api.localIdentity(second) && first!=second,"same address with a new pool generation cannot reuse source");
+        } else check(which=="local_capture_identity" && f.api.localIdentity(second) && first==second,"stable local identity");
+        check(!f.memory.setups && !f.memory.registers && !f.memory.removes,"capture has no engine lifecycle mutation");return;
+    }
     if (which=="command_encoding") {
         sp::create_player::Program p{};
         check(sp::create_player::encodeGround({100,200,29},p),"finite native parameters");

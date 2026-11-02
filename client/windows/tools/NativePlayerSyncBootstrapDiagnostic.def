@@ -1,0 +1,7 @@
+LIBRARY "GrandMPNativePlayerSyncExperimental.asi"
+EXPORTS
+    InitializeASI
+    GrandMPNativePlayerStatus=GrandMPPedSmokeStatus
+    GrandMPNativePlayerCallbackCount=GrandMPPedSmokeCallbackCount
+    GrandMPNativePlayerRequestRemoval=GrandMPPedSmokeRequestRemoval
+    GrandMPNativePlayerBootstrapDiagnostic DATA

@@ -90,6 +90,72 @@ void run(std::string_view mode,const char* file) {
         check(!okay && !std::strcmp(f.category,"page_type"),"RWX private page never substitutes for image");
         check(ps::factoryHoodlumWindow(0x1566E30,0x60) && !ps::factoryHoodlumWindow(ps::phaseCall,5) && !ps::factoryHoodlumWindow(0x1576FFF,2),"COW exception bounded to original Hoodlum section");return;
     }
+    if (mode=="cow") {
+        const auto makePages=[] {
+            std::array<ps::CodePageObservation,2> pages{};
+            for (std::size_t i=0;i<pages.size();++i) {
+                auto& p=pages[i];p.queriedAddress=ps::hoodlumCowPages[i];p.baseAddress=ps::hoodlumCowPages[i];
+                p.regionSize=ps::hoodlumPageSize;p.allocationBase=ps::imageBase;p.state=MEM_COMMIT;p.type=MEM_IMAGE;
+                p.protection=PAGE_EXECUTE_WRITECOPY;p.allocationProtection=PAGE_EXECUTE_WRITECOPY;
+                p.queryComplete=true;p.workingSetComplete=true;p.workingSetValid=true;p.workingSetShared=true;
+            }
+            return pages;
+        };
+        auto pages=makePages();
+        check(ps::identityHoodlumCowPages(f,ps::hoodlumCowWindowAddress,ps::hoodlumCowWindowSize,pages,true,{false,false}),"authenticated shared two-page COW profile");
+        check(ps::hoodlumCowCodeWindow(0x53BEE0,380) && ps::hoodlumCowCodeWindow(0x53C061,0x39) &&
+            ps::hoodlumCowCodeWindow(ps::phaseCall,5) && !ps::hoodlumCowCodeWindow(0x53BEE0,379) &&
+            !ps::hoodlumCowCodeWindow(0x53B000,0x1000),"COW identity check limited to exact code windows");
+        f={};check(!ps::identityHoodlumCowPages(f,ps::hoodlumCowWindowAddress+1,ps::hoodlumCowWindowSize-1,
+            pages,true,{false,false}) && !std::strcmp(f.category,"cow_window_not_allowed"),
+            "nearby COW range cannot borrow the authenticated exception");
+        f={};pages=makePages();pages[0].workingSetShared=false;
+        check(!ps::identityHoodlumCowPages(f,ps::hoodlumCowWindowAddress,ps::hoodlumCowWindowSize,pages,true,{false,false}) &&
+            !std::strcmp(f.category,"working_set_private_unowned") && f.address==ps::hoodlumCowPages[0],
+            "first page private before exact owned patch refused");
+        f={};pages=makePages();pages[0].workingSetShared=false;
+        check(ps::identityHoodlumCowPages(f,ps::hoodlumCowWindowAddress,ps::hoodlumCowWindowSize,pages,true,{true,false}),"first page private only after exact own patch publication");
+        f={};pages=makePages();pages[1].workingSetShared=false;
+        check(!ps::identityHoodlumCowPages(f,ps::hoodlumCowWindowAddress,ps::hoodlumCowWindowSize,pages,true,{false,false}) &&
+            !std::strcmp(f.category,"working_set_private_unowned"),"second page private before exact hook publication refused");
+        f={};pages=makePages();pages[1].workingSetShared=false;
+        check(ps::identityHoodlumCowPages(f,ps::hoodlumCowWindowAddress,ps::hoodlumCowWindowSize,pages,true,{false,true}),"second page private only after exact own hook publication");
+        f={};pages=makePages();pages[0].workingSetShared=false;pages[1].workingSetShared=false;
+        check(ps::identityHoodlumCowPages(f,ps::hoodlumCowWindowAddress,ps::hoodlumCowWindowSize,pages,true,{true,true}),"both pages private only with corresponding owned patches");
+        return;
+    }
+    if (mode=="cow_rejections") {
+        const auto makePages=[] {
+            std::array<ps::CodePageObservation,2> pages{};
+            for (std::size_t i=0;i<pages.size();++i) {
+                auto& p=pages[i];p.queriedAddress=ps::hoodlumCowPages[i];p.baseAddress=ps::hoodlumCowPages[i];
+                p.regionSize=ps::hoodlumPageSize;p.allocationBase=ps::imageBase;p.state=MEM_COMMIT;p.type=MEM_IMAGE;
+                p.protection=PAGE_EXECUTE_WRITECOPY;p.allocationProtection=PAGE_EXECUTE_WRITECOPY;
+                p.queryComplete=true;p.workingSetComplete=true;p.workingSetValid=true;p.workingSetShared=true;
+            }
+            return pages;
+        };
+        auto refused=[&](auto alter,const char* category,const char* label) {
+            auto pages=makePages();alter(pages);f={};
+            check(!ps::identityHoodlumCowPages(f,ps::hoodlumCowWindowAddress,ps::hoodlumCowWindowSize,pages,true,{false,false}) && !std::strcmp(f.category,category),label);
+        };
+        auto pages=makePages();f={};
+        check(!ps::identityHoodlumCowPages(f,ps::hoodlumCowWindowAddress,ps::hoodlumCowWindowSize,pages,false,{false,false}) &&
+            !std::strcmp(f.category,"hoodlum_identity_unavailable"),"unauthenticated executable refused");
+        for (std::size_t i=0;i<2;++i) {
+            refused([=](auto& p){p[i].queryComplete=false;p[i].queryError=ERROR_ACCESS_DENIED;},"page_query_failed","each page query failure refused");
+            refused([=](auto& p){p[i].queriedAddress+=0x1000;},"page_query_address","each wrong page address refused");
+            refused([=](auto& p){p[i].state=MEM_RESERVE;},"page_state","each uncommitted page refused");
+            refused([=](auto& p){p[i].type=MEM_PRIVATE;},"page_type","each private mapping refused");
+            refused([=](auto& p){p[i].allocationBase=0x500000;},"image_allocation","each different allocation refused");
+            refused([=](auto& p){p[i].protection=PAGE_EXECUTE_READWRITE;},"page_protection","each unexpected current protection refused");
+            refused([=](auto& p){p[i].allocationProtection=PAGE_EXECUTE_READ;},"page_protection","each unexpected allocation protection refused");
+            refused([=](auto& p){p[i].baseAddress=ps::hoodlumCowPages[i]+0x1000;p[i].regionSize=0x1000;},"page_span","each incomplete page region refused");
+            refused([=](auto& p){p[i].workingSetComplete=false;p[i].workingSetError=ERROR_ACCESS_DENIED;},"working_set_query_failed","each working-set query failure refused");
+            refused([=](auto& p){p[i].workingSetValid=false;},"working_set_not_resident","each nonresident page refused");
+        }
+        return;
+    }
     if (mode=="image") {
         check(file!=nullptr,"authorized image argument");const auto bytes=fileBytes(file);
         check(bytes.size()==14383616,"authorized image size");

@@ -1,4 +1,5 @@
 #include "grandmp/server/sessions.hpp"
+#include "grandmp/core/ipv4_endpoint.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -27,6 +28,7 @@
 #include <limits>
 #include <random>
 #include <span>
+#include <string>
 #include <string_view>
 
 namespace {
@@ -172,14 +174,22 @@ void sendSnapshot(NativeSocket socket, const grandmp::server::SessionTable& sess
 
 int main(int argc, char* argv[]) {
     std::uint16_t port = 7777;
+    grandmp::core::Ipv4Address bindAddress=grandmp::core::loopbackAddress;
+    std::string bindText="127.0.0.1";
+    bool bindSet=false,portSet=false;
+    constexpr auto usage="Uso: grandmp_server [--port 1..65535] [--bind private-IPv4]\n";
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
-        std::cout << "Uso: grandmp_server [--port 1..65535] (bind 127.0.0.1)\n";
+        std::cout << usage;
         return 0;
     }
-    if (argc != 1 && (argc != 3 || std::string_view(argv[1]) != "--port" ||
-                      !parsePort(argv[2], port))) {
-        std::cerr << "Uso: grandmp_server [--port 1..65535]\n";
-        return 2;
+    for(int i=1;i<argc;i+=2) {
+        if(i+1>=argc) { std::cerr<<usage;return 2; }
+        const std::string_view option=argv[i];
+        if(option=="--port" && !portSet && parsePort(argv[i+1],port)) portSet=true;
+        else if(option=="--bind" && !bindSet && grandmp::core::parseIpv4Address(argv[i+1],bindAddress) &&
+                grandmp::core::validLabEndpoint({bindAddress,port})) {
+            bindText=argv[i+1];bindSet=true;
+        } else { std::cerr<<usage;return 2; }
     }
     SocketRuntime runtime;
     if (!runtime.valid()) {
@@ -193,10 +203,11 @@ int main(int argc, char* argv[]) {
     }
     sockaddr_in local{};
     local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const grandmp::server::Endpoint bindEndpoint{bindAddress,port};
+    local.sin_addr.s_addr = toSockaddr(bindEndpoint).sin_addr.s_addr;
     local.sin_port = htons(port);
     if (::bind(socket.get(), reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
-        std::cerr << "Falha ao escutar 127.0.0.1:" << port << ".\n";
+        std::cerr << "Falha ao escutar " << bindText << ':' << port << ".\n";
         return 2;
     }
 #ifdef _WIN32
@@ -209,8 +220,8 @@ int main(int argc, char* argv[]) {
     grandmp::server::SessionTable sessions(firstSessionId());
     std::array<std::uint8_t, 2048> packet{};
     auto lastRejectLog = grandmp::server::SessionTable::Clock::time_point{};
-    std::cout << "GrandMP Server UDP v1 escutando em 127.0.0.1:" << port
-              << "; Ctrl+C encerra.\n";
+    std::cout << "GrandMP Server UDP v1 escutando em " << bindText << ':' << port
+              << "; Ctrl+C encerra." << std::endl;
     while (!stopRequested) {
         fd_set readSet;
         FD_ZERO(&readSet);
@@ -245,8 +256,12 @@ int main(int argc, char* argv[]) {
                                       static_cast<int>(packet.size()), 0,
                                       reinterpret_cast<sockaddr*>(&remote), &remoteLength);
         if (received < 0) continue;  // Inclui datagramas grandes rejeitados pelo Winsock.
-        if (remote.sin_family != AF_INET || remoteLength != sizeof(remote) ||
-            ntohl(remote.sin_addr.s_addr) != INADDR_LOOPBACK) continue;
+        if (remote.sin_family != AF_INET || remoteLength != sizeof(remote)) continue;
+        const auto incoming=endpointFrom(remote);
+        const bool acceptedSource=!bindSet ? incoming.address==grandmp::core::loopbackAddress :
+            grandmp::core::loopbackIpv4(bindAddress) ? grandmp::core::loopbackIpv4(incoming.address) :
+            grandmp::core::privateIpv4(incoming.address);
+        if(!acceptedSource) continue;
         const auto decoded = grandmp::protocol::decode(
             std::span<const std::uint8_t>(packet.data(), static_cast<std::size_t>(received)));
         if (!decoded.message) {
@@ -270,7 +285,9 @@ int main(int argc, char* argv[]) {
             sendSnapshot(socket.get(), sessions, event.sessionId, endpoint);
             broadcast(socket.get(), sessions, event.sessionId,
                       grandmp::protocol::RemoteJoin{event.sessionId});
-            std::cout << "Sessão " << event.sessionId << " conectada (127.0.0.1:"
+            std::cout << "Sessão " << event.sessionId << " conectada ("
+                      << unsigned(endpoint.address[0]) << '.' << unsigned(endpoint.address[1]) << '.'
+                      << unsigned(endpoint.address[2]) << '.' << unsigned(endpoint.address[3]) << ':'
                       << endpoint.port << ").\n";
             break;
         case EventKind::welcome_repeated:

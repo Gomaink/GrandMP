@@ -7,6 +7,13 @@ std::atomic<nr::ReceiverState> nativeReceiver{nr::ReceiverState::idle};
 np::Binding<true>* nativeBinding=nullptr; // Resident; prepared on the admitted window/game thread.
 std::optional<nf::Api> nativeApi;
 bool nativeFinished=false,nativeF8Down=false;
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+grandmp::core::LocalPlayerSnapshots localSnapshots; // Resident, like nativePlayers.
+std::atomic<bool> localSourceStopped{false};
+np::LocalKinematics localKinematics; // Native-thread private; no native addresses.
+std::optional<nf::LocalIdentity> localIdentity;
+std::uint64_t localCaptureMs=0;
+#endif
 #if defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) && GRANDMP_NATIVE_INPUT_REPLAY_BUILD == 1
 namespace ni=np::replay;
 ni::HookCell inputHook;
@@ -101,6 +108,9 @@ nf::WindowsAccess nativeAccess({nullptr,nativeContext,nativeReady,nativeSpawn
 #if defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) && GRANDMP_NATIVE_INPUT_REPLAY_BUILD == 1
 #include "native_player_input_runtime.inl"
 #endif
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+#include "local_player_capture_runtime.inl"
+#endif
 bool prepareNativeBinding() noexcept {
     nativeBinding=np::Binding<true>::prepare(std::this_thread::get_id());
     if (!nativeBinding) return false;
@@ -116,11 +126,44 @@ DWORD WINAPI nativeNetwork(void*) {
         if (state==nr::ReceiverState::failed) runtimeDisabled.store(true);
         writeLog(state==nr::ReceiverState::failed ? "failed" : "waiting",reason);
     };
-    if (!nr::initializeReceiver(network,length && length<64 ? std::wstring_view(endpoint,length) : std::wstring_view{},report)) return 0;
+    if (!nr::initializeReceiver(network,length && length<64 ? std::wstring_view(endpoint,length) : std::wstring_view{},report
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+        ,true // Alpha 0.9 only; Alpha 0.8 keeps its strict loopback initializer.
+#endif
+        )) return 0;
     // Module is PINned by the original bootstrap. Only values cross this seam.
     // No native calls, entity pointers or context changes occur on this worker.
-    try { while (!runtimeDisabled.load()) { network.tick(std::nullopt);Sleep(20); } }
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+    std::uint64_t sourceLoggedSession=0;
+#endif
+    try { while (!runtimeDisabled.load()
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+        && !localSourceStopped.load()
+#endif
+    ) {
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+        if (!network.tickLocal(localSnapshots)) {
+            report(nr::ReceiverState::failed,"local_snapshot_send_failed_terminal");break;
+        }
+        if (network.sentSequence() && network.sessionId()!=sourceLoggedSession) {
+            sourceLoggedSession=network.sessionId();char reason[160]{};
+            std::snprintf(reason,sizeof(reason),"local_snapshot_sender_ready session=%llu seq=%u source=CJ_pad0_pre_world",
+                static_cast<unsigned long long>(sourceLoggedSession),network.sentSequence());
+            writeLog("waiting",reason);
+        }
+#else
+        network.tick(std::nullopt);
+#endif
+        Sleep(20);
+    } }
     catch (...) { report(nr::ReceiverState::failed,"native_player_receiver_exception_terminal"); }
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+    localSnapshots.session(0);
+    char summary[160]{};
+    std::snprintf(summary,sizeof(summary),"local_snapshot_sender_ended session=%llu last_seq=%u",
+        static_cast<unsigned long long>(network.sessionId()),network.sentSequence());
+    writeLog("waiting",summary);
+#endif
     network.stop();return 0;
 }
 bool startNativeNetwork() {
@@ -130,6 +173,9 @@ bool startNativeNetwork() {
     CloseHandle(worker);writeLog("waiting","native_player_receiver_thread_created_not_ready");return true;
 }
 void nativeTick(bool gameplay) {
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+    captureLocalPlayer(gameplay); // Same pre-world callback, before any remote pad scope.
+#endif
 #if defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) && GRANDMP_NATIVE_INPUT_REPLAY_BUILD == 1
     inputReport();
 #endif
@@ -137,6 +183,9 @@ void nativeTick(bool gameplay) {
     DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
     const bool down=pid==GetCurrentProcessId() && (GetAsyncKeyState(VK_F8)&0x8000)!=0;
     const bool remove=removalRequested.exchange(false) || (down && !nativeF8Down);nativeF8Down=down;
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+    if (remove) { localSnapshots.invalidate();localSourceStopped.store(true); }
+#endif
     const auto before=nativeBinding->key();
     np::Api& api=
 #if defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) && GRANDMP_NATIVE_INPUT_REPLAY_BUILD == 1
@@ -163,6 +212,9 @@ void nativeTick(bool gameplay) {
 #endif
     }
     else if (result==np::Result::removed) {
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+        localSnapshots.invalidate();localSourceStopped.store(true);
+#endif
         nativeFinished=true;char reason[256]{};
         std::snprintf(reason,sizeof(reason),"slot=1 release_pool_and_group_verified_no_respawn remote=%llu generation=%llu cause=%s",
             static_cast<unsigned long long>(before.player),static_cast<unsigned long long>(before.generation),nativeBinding->retirementReason());

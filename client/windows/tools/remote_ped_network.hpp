@@ -6,15 +6,23 @@ enum class ReceiverState { idle, starting, endpoint_validated, observer_initiali
 
 // Local readiness does not imply Welcome/server connectivity. No engine calls.
 template<class Network, class Report>
-bool initializeReceiver(Network& network, std::wstring_view endpoint, Report report) noexcept {
+bool initializeReceiver(Network& network, std::wstring_view endpoint, Report report,
+                        bool allowLan=false) noexcept {
     try {
         std::uint16_t port = 0;
-        if (!parseLoopbackEndpoint(endpoint, port)) {
+        core::Ipv4Endpoint target{};
+        if (allowLan ? !parseLanEndpoint(endpoint,target) : !parseLoopbackEndpoint(endpoint, port)) {
             report(ReceiverState::failed, "remote_receiver_failed_endpoint_invalid");
             return false;
         }
-        report(ReceiverState::endpoint_validated, "remote_endpoint_validated_loopback");
-        if (!network.start(port)) {
+        report(ReceiverState::endpoint_validated, allowLan ? "remote_endpoint_validated_private_or_loopback" : "remote_endpoint_validated_loopback");
+        bool started=false;
+        if constexpr (requires { network.start(target); }) {
+            started=allowLan ? network.start(target) : network.start(port);
+        } else {
+            if (!allowLan) started=network.start(port);
+        }
+        if (!started) {
             report(ReceiverState::failed, "remote_receiver_failed_observer_start");
             return false;
         }

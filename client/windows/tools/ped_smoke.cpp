@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <bcrypt.h>
+#include <psapi.h>
 
 #include "grandmp/windows/executable_detection.hpp"
 #include "ped_smoke_addresses.hpp"
@@ -13,6 +14,13 @@
 #include "ped_smoke_move_native.hpp"
 #include "ped_smoke_runtime_read.hpp"
 #include "ped_smoke_code_identity.hpp"
+#include "ped_smoke_patch_transaction.hpp"
+#include "ped_smoke_admission_diagnostics.hpp"
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1 && \
+    (!defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) || GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD != 1 || \
+     !defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) || GRANDMP_NATIVE_INPUT_REPLAY_BUILD != 1 || !defined(GRANDMP_CPLAYER_VARIANT))
+#error Background gameplay requires the isolated Alpha 0.9 capture/replay variant
+#endif
 #if defined(GRANDMP_PASSIVE_MOVEMENT_DIAGNOSTIC_BUILD) && GRANDMP_PASSIVE_MOVEMENT_DIAGNOSTIC_BUILD == 1
 #if !defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) || GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD != 1
 #error Passive movement diagnostics require the exclusive task diagnostic variant
@@ -36,9 +44,19 @@
 #endif
 
 #if defined(GRANDMP_CPLAYER_VARIANT)
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1 && \
+    (!defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) || GRANDMP_NATIVE_INPUT_REPLAY_BUILD != 1)
+#error Local player capture requires the isolated CPlayerPed input replay variant
+#endif
 #include "native_second_player.hpp"
 #if defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) && GRANDMP_NATIVE_INPUT_REPLAY_BUILD == 1
 #include "native_player_replay.hpp"
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+#include "local_player_capture.hpp"
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+#include "background_gameplay.hpp"
+#endif
+#endif
 #endif
 #include "remote_ped_network.hpp"
 #include <optional>
@@ -52,6 +70,17 @@
 #include <filesystem>
 #include <intrin.h>
 #include <vector>
+
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+#include "native_player_bootstrap_diagnostic.hpp"
+namespace bd = grandmp::windows::bootstrap_diagnostic;
+extern "C" {
+constinit bd::Data GrandMPNativePlayerBootstrapDiagnostic{};
+}
+#define BOOT_NOTE(event, ...) do { using namespace bd; bd::publish(GrandMPNativePlayerBootstrapDiagnostic, bd::Event::event, __VA_ARGS__); } while(false)
+#else
+#define BOOT_NOTE(...) ((void)0)
+#endif
 
 static_assert(sizeof(void*) == 4, "Ped smoke requires Win32 x86");
 namespace {
@@ -78,15 +107,36 @@ DWORD gameThread = 0;
 bool phaseDispatchActive = false; // Accessed only after authenticating gameThread.
 HANDLE executableFile = INVALID_HANDLE_VALUE; // Retained for installed profile lifetime.
 std::vector<std::byte> executable;
+std::atomic<bool> hoodlumIdentityAuthenticated{false};
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+namespace bg = grandmp::windows::background_gameplay;
+bg::Patches backgroundPatches; // Resident with the pinned phase/input wrappers.
+#endif
 
 void writeLog(const char* state, const char* reason, std::uintptr_t ped = 0) noexcept {
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+    // Only the first log attempt is traced. Never add a fallback file or retry.
+    const bool trace = InterlockedCompareExchange(&GrandMPNativePlayerBootstrapDiagnostic.logClaimed,1,0)==0;
+    if(trace) BOOT_NOTE(module_path,entered);
+#endif
     wchar_t path[32768]{};
     const DWORD length = GetModuleFileNameW(module, path, 32768);
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+    const DWORD pathError=(!length || length>=32768) ? GetLastError() : ERROR_SUCCESS;
+    if(trace) BOOT_NOTE(module_path, (!length || length>=32768) ? failed : succeeded, pathError, static_cast<LONG>(length));
+#endif
     if (!length || length >= 32768) return;
     wchar_t* slash = std::wcsrchr(path, L'\\');
-    if (!slash) return;
+    if (!slash) {
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+        if(trace) BOOT_NOTE(log_path,failed,0,1); // Synthetic detail, no Win32 call failed.
+#endif
+        return;
+    }
     constexpr wchar_t filename[] =
-#if defined(GRANDMP_CPLAYER_VARIANT)
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+        L"GrandMPNativePlayerSyncExperimental.log";
+#elif defined(GRANDMP_CPLAYER_VARIANT)
         L"GrandMPNativePlayerExperimental.log";
 #elif defined(GRANDMP_REMOTE_PED_MOVE_VARIANT)
         L"GrandMPRemotePedMoveExperimental.log";
@@ -95,16 +145,38 @@ void writeLog(const char* state, const char* reason, std::uintptr_t ped = 0) noe
 #else
         L"GrandMPPedSmoke.log";
 #endif
-    if (slash - path + 1 + std::size(filename) > std::size(path)) return;
+    if (slash - path + 1 + std::size(filename) > std::size(path)) {
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+        if(trace) BOOT_NOTE(log_path,failed,0,2);
+#endif
+        return;
+    }
     wcscpy_s(slash + 1, std::size(path) - (slash - path + 1), filename);
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+    if(trace) { BOOT_NOTE(log_path,succeeded);BOOT_NOTE(create_file,entered); }
+#endif
     const HANDLE file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, 0, nullptr);
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+    const DWORD fileError=file==INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    if(trace) BOOT_NOTE(create_file, file==INVALID_HANDLE_VALUE ? failed : succeeded, fileError);
+#endif
     if (file == INVALID_HANDLE_VALUE) return;
     char line[512]{};
     const int count = std::snprintf(line, sizeof(line),
         "[GrandMPPedSmoke] state=%s reason=%s pid=%lu tid=%lu ped=%08lX callback=%u\r\n",
         state, reason, GetCurrentProcessId(), GetCurrentThreadId(), ped, callbacks.load());
     DWORD written = 0;
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+    if (count > 0 && count < sizeof(line)) {
+        if(trace) BOOT_NOTE(write_file,entered);
+        const BOOL okay=WriteFile(file,line,static_cast<DWORD>(count),&written,nullptr);
+        const DWORD error=okay ? ERROR_SUCCESS : GetLastError();
+        if(trace) BOOT_NOTE(write_file, (!okay || written!=static_cast<DWORD>(count)) ? failed : succeeded,
+                            error,static_cast<LONG>(written));
+    } else if(trace) { BOOT_NOTE(write_file,failed,0,-1); }
+#else
     if (count > 0 && count < sizeof(line)) WriteFile(file, line, static_cast<DWORD>(count), &written, nullptr);
+#endif
     CloseHandle(file);
 }
 
@@ -124,6 +196,117 @@ bool imagePage(std::uint32_t address, std::size_t size, bool code) noexcept {
         reinterpret_cast<std::uintptr_t>(page.AllocationBase) == ps::imageBase &&
         (code ? page.Protect == PAGE_EXECUTE_READ : page.Protect == PAGE_READONLY) &&
         std::uint64_t{address} + size <= reinterpret_cast<std::uintptr_t>(page.BaseAddress) + page.RegionSize;
+}
+
+bool observeHoodlumCowPages(ps::CodeIdentityFailure& failure, std::uint32_t address, std::size_t size) noexcept {
+    std::array<ps::CodePageObservation, 2> observations{};
+    for (std::size_t i = 0; i < observations.size(); ++i) {
+        auto& out = observations[i];
+        out.queriedAddress = ps::hoodlumCowPages[i];
+        MEMORY_BASIC_INFORMATION page{};
+        const SIZE_T queried = VirtualQuery(reinterpret_cast<LPCVOID>(out.queriedAddress), &page, sizeof(page));
+        const DWORD queryError = queried == sizeof(page) ? ERROR_SUCCESS : GetLastError();
+        out.queryComplete = queried == sizeof(page);
+        out.queryError = queryError;
+        if (out.queryComplete) {
+            out.baseAddress = reinterpret_cast<std::uintptr_t>(page.BaseAddress);
+            out.regionSize = page.RegionSize;
+            out.allocationBase = reinterpret_cast<std::uintptr_t>(page.AllocationBase);
+            out.state = page.State;
+            out.type = page.Type;
+            out.protection = page.Protect;
+            out.allocationProtection = page.AllocationProtect;
+        }
+
+        PSAPI_WORKING_SET_EX_INFORMATION workingSet{};
+        workingSet.VirtualAddress = reinterpret_cast<void*>(out.queriedAddress);
+        const BOOL workingSetOkay = K32QueryWorkingSetEx(GetCurrentProcess(), &workingSet,
+            static_cast<DWORD>(sizeof(workingSet)));
+        const DWORD workingSetError = workingSetOkay ? ERROR_SUCCESS : GetLastError();
+        out.workingSetComplete = workingSetOkay != FALSE;
+        out.workingSetError = workingSetError;
+        if (out.workingSetComplete) {
+            out.workingSetValid = workingSet.VirtualAttributes.Valid != 0;
+            out.workingSetShared = workingSet.VirtualAttributes.Shared != 0;
+        }
+    }
+
+    std::array<bool, 2> privatePageOwnedByExactPatch{};
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+    privatePageOwnedByExactPatch[0] = backgroundPatches.hasPublishedPatchInRange(
+        ps::hoodlumCowPages[0], ps::hoodlumPageSize);
+    privatePageOwnedByExactPatch[1] = backgroundPatches.hasPublishedPatchInRange(
+        ps::hoodlumCowPages[1], ps::hoodlumPageSize);
+#endif
+    privatePageOwnedByExactPatch[1] = privatePageOwnedByExactPatch[1] || hookPublished.load(std::memory_order_acquire);
+    return ps::identityHoodlumCowPages(failure, address, size, observations,
+        hoodlumIdentityAuthenticated.load(std::memory_order_acquire), privatePageOwnedByExactPatch);
+}
+
+bool identityCodePage(ps::CodeIdentityFailure& failure, std::uint32_t address, std::size_t size) noexcept {
+    if (ps::identityPage(failure, address, size, PAGE_EXECUTE_READ)) return true;
+    const bool expectedCowProtectionFailure = !std::strcmp(failure.category, "page_protection") ||
+        !std::strcmp(failure.category, "page_span");
+    if (!expectedCowProtectionFailure || failure.observedProtection != PAGE_EXECUTE_WRITECOPY ||
+        !ps::hoodlumCowCodeWindow(address, size)) return false;
+    ps::CodeIdentityFailure cowFailure{};
+    cowFailure.function = failure.function;
+    if (observeHoodlumCowPages(cowFailure, address, size)) {
+        failure = {};
+        failure.function = cowFailure.function;
+        return true;
+    }
+    failure = cowFailure;
+    return false;
+}
+
+bool authorizeCowPatch(void*, std::uint32_t address, std::size_t size, DWORD& error) noexcept {
+    if (!hoodlumIdentityAuthenticated.load(std::memory_order_acquire) ||
+        !ps::patch_transaction::exactCowSite(address, size)) {
+        error = ERROR_ACCESS_DENIED;
+        return false;
+    }
+    ps::CodeIdentityFailure failure{};
+    failure.function = "authorizeCowPatch";
+    if (identityCodePage(failure, address, size)) { error = ERROR_SUCCESS; return true; }
+
+    // Fixed background callsites can be RX initially while their image section
+    // is COW-backed. After one exact patch privatizes their shared page, permit
+    // the next exact preimage on that same page only while this process owns a
+    // previously published patch in the page.
+    MEMORY_BASIC_INFORMATION page{};
+    const auto count = VirtualQuery(reinterpret_cast<void*>(address), &page, sizeof(page));
+    if (count != sizeof(page) || page.State != MEM_COMMIT || page.Type != MEM_IMAGE ||
+        reinterpret_cast<std::uintptr_t>(page.AllocationBase) != ps::imageBase ||
+        (page.Protect != PAGE_EXECUTE_WRITECOPY && page.Protect != PAGE_EXECUTE_READWRITE) ||
+        page.AllocationProtect != PAGE_EXECUTE_WRITECOPY) {
+        error = failure.error ? failure.error : ERROR_INVALID_DATA;
+        return false;
+    }
+    const auto pageBase = reinterpret_cast<std::uintptr_t>(page.BaseAddress);
+    if (pageBase > address || pageBase + page.RegionSize < std::uint64_t{address} + size) {
+        error = ERROR_INVALID_ADDRESS;
+        return false;
+    }
+    PSAPI_WORKING_SET_EX_INFORMATION workingSet{};
+    workingSet.VirtualAddress = reinterpret_cast<void*>(address);
+    const BOOL queried = K32QueryWorkingSetEx(GetCurrentProcess(), &workingSet, sizeof(workingSet));
+    const DWORD queryError = queried ? ERROR_SUCCESS : GetLastError();
+    if (!queried || !workingSet.VirtualAttributes.Valid) {
+        error = queryError ? queryError : ERROR_INVALID_DATA;
+        return false;
+    }
+    if (workingSet.VirtualAttributes.Shared && page.Protect == PAGE_EXECUTE_WRITECOPY) {
+        error = ERROR_SUCCESS; return true;
+    }
+    bool owned = pageBase == ps::phaseCall - (ps::phaseCall % ps::hoodlumPageSize) &&
+        hookPublished.load(std::memory_order_acquire);
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+    owned = owned || backgroundPatches.hasPublishedPatchInRange(
+        static_cast<std::uint32_t>(pageBase), ps::hoodlumPageSize);
+#endif
+    error = owned ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
+    return owned;
 }
 
 // Map an admitted PE32 file RVA to raw bytes, with bounds at every step.
@@ -162,7 +345,14 @@ bool codeMatches(ps::CodeIdentityFailure* detail = nullptr) noexcept {
         std::array<std::byte, 0x5C0> observed{};
         if (!original) return ps::identityRefuse(failure, "disk_mapping_failed", region.address, region.size);
         if (region.size > observed.size()) return ps::identityRefuse(failure, "buffer_capacity", region.address, region.size);
-        if (!ps::identityPage(failure, region.address, region.size, PAGE_EXECUTE_READ) ||
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+        std::array<std::byte, 0x5C0> reconciled{};
+        std::memcpy(reconciled.data(), original, region.size);
+        if (!backgroundPatches.overlay(region.address, reconciled.data(), region.size))
+            return ps::identityRefuse(failure, "background_disk_bytes_mismatch", region.address, region.size);
+        original = reconciled.data(); // Only the exact published sites may differ.
+#endif
+        if (!identityCodePage(failure, region.address, region.size) ||
             !ps::identityRead(failure, region.address, observed.data(), region.size) ||
             !ps::identityBytes(failure, region.address, observed.data(), original, region.size)) return false;
     }
@@ -170,18 +360,62 @@ bool codeMatches(ps::CodeIdentityFailure* detail = nullptr) noexcept {
     const auto* disk = diskBytes(ps::phaseCall, observed.size());
     if (!disk) return ps::identityRefuse(failure, "disk_mapping_failed", ps::phaseCall, observed.size());
     if (!ps::identityBytes(failure, ps::phaseCall, disk, ps::originalCall.data(), observed.size(), "disk_bytes_mismatch") ||
-        !ps::identityPage(failure, ps::phaseCall, observed.size(), PAGE_EXECUTE_READ) ||
+        !identityCodePage(failure, ps::phaseCall, observed.size()) ||
         !ps::identityRead(failure, ps::phaseCall, observed.data(), observed.size())) return false;
     // The installed five bytes are intentionally NOT compared with the disk CALL.
     return ps::identityPublishedBytes(failure, ps::phaseCall, observed.data(), ps::originalCall.data(),
         installedCall.data(), observed.size(), hookPublished.load());
 }
-bool admitExecutable() {
+bool admitExecutable(ps::AdmissionFailure* detail = nullptr) {
+    ps::AdmissionFailure local{};
+    auto& failure = detail ? *detail : local;
+    failure = {};
+    hoodlumIdentityAuthenticated.store(false, std::memory_order_release);
+    const auto canonical = [&](const wchar_t* input, std::filesystem::path& output, const char* stage) {
+        try { output = ps::canonicalForAdmission(input); return true; }
+        catch (const std::filesystem::filesystem_error& error) {
+            failure.filesystemError = error.code().value();
+            failure.filesystemSystem = error.code().category() == std::system_category();
+            return ps::admissionRefuse(failure, stage, "canonical_failed");
+        }
+    };
+    const auto imageBaseMatches = [&] {
+        const auto base = GetModuleHandleW(nullptr);
+        const DWORD error = base ? ERROR_SUCCESS : GetLastError();
+        if (reinterpret_cast<std::uintptr_t>(base) != ps::imageBase)
+            return ps::admissionRefuse(failure, "image_base", base ? "base_mismatch" : "module_lookup_failed", error);
+        return true;
+    };
     wchar_t path[32768]{};
     wchar_t ownPath[32768]{};
     const DWORD ownLength = GetModuleFileNameW(module, ownPath, 32768);
-    if (!ownLength || ownLength >= 32768 || std::filesystem::canonical(ownPath) !=
-        std::filesystem::path(
+    const DWORD ownError = (!ownLength || ownLength >= 32768) ? GetLastError() : ERROR_SUCCESS;
+    if (!ownLength || ownLength >= 32768)
+        return ps::admissionRefuse(failure, "asi_module_path", ownLength ? "path_truncated" : "path_read_failed", ownError);
+#if defined(GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD) && GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD == 1
+    // Original two explicit roots; no case folding, aliases or fallback admission.
+    const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
+    const DWORD pathError = (!length || length >= 32768) ? GetLastError() : ERROR_SUCCESS;
+    if (!length || length >= 32768)
+        return ps::admissionRefuse(failure, "game_module_path", length ? "path_truncated" : "path_read_failed", pathError);
+    if (!imageBaseMatches()) return false;
+    std::filesystem::path own, game;
+    if (!canonical(ownPath, own, "asi_canonical") || !canonical(path, game, "game_canonical")) return false;
+    bool matched = false, ownMatched = false, gameMatched = false;
+    for (const auto* root : {L"D:/Jogos/GrandMP-Smoke", L"D:/Jogos/GrandMP-Smoke-B"}) {
+        const std::filesystem::path base(root);
+        const bool gameHere = game == base / L"gta_sa.exe";
+        const bool ownHere = own == base / L"scripts/GrandMPNativePlayerSyncExperimental.asi";
+        matched = matched || (gameHere && ownHere);
+        gameMatched = gameMatched || gameHere;
+        ownMatched = ownMatched || ownHere;
+    }
+    if (!matched) return ps::admissionRefuse(failure, "canonical_paths",
+        !gameMatched ? "game_path_mismatch" : !ownMatched ? "asi_path_mismatch" : "root_pair_mismatch");
+#else
+    std::filesystem::path own;
+    if (!canonical(ownPath, own, "asi_canonical")) return false;
+    if (own != std::filesystem::path(
 #if defined(GRANDMP_CPLAYER_VARIANT)
             L"D:/Jogos/GrandMP-Smoke/scripts/GrandMPNativePlayerExperimental.asi"
 #elif defined(GRANDMP_REMOTE_PED_MOVE_VARIANT)
@@ -191,25 +425,61 @@ bool admitExecutable() {
 #else
             L"D:/Jogos/GrandMP-Smoke/scripts/GrandMPPedSmoke.asi"
 #endif
-        )) return false;
+        )) return ps::admissionRefuse(failure, "canonical_paths", "asi_path_mismatch");
     const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
-    if (!length || length >= 32768 || reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)) != ps::imageBase ||
-        std::filesystem::canonical(path) != std::filesystem::path(L"D:/Jogos/GrandMP-Smoke/gta_sa.exe")) return false;
+    const DWORD pathError = (!length || length >= 32768) ? GetLastError() : ERROR_SUCCESS;
+    if (!length || length >= 32768)
+        return ps::admissionRefuse(failure, "game_module_path", length ? "path_truncated" : "path_read_failed", pathError);
+    if (!imageBaseMatches()) return false;
+    std::filesystem::path game;
+    if (!canonical(path, game, "game_canonical")) return false;
+    if (game != std::filesystem::path(L"D:/Jogos/GrandMP-Smoke/gta_sa.exe"))
+        return ps::admissionRefuse(failure, "canonical_paths", "game_path_mismatch");
+#endif
     executableFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (executableFile == INVALID_HANDLE_VALUE) return false;
+    if (executableFile == INVALID_HANDLE_VALUE)
+        return ps::admissionRefuse(failure, "executable_open", "open_failed", GetLastError());
     LARGE_INTEGER size{};
-    if (!GetFileSizeEx(executableFile, &size) || size.QuadPart != 14383616) return false;
+    if (!GetFileSizeEx(executableFile, &size))
+        return ps::admissionRefuse(failure, "executable_size", "size_read_failed", GetLastError());
+    if (size.QuadPart != 14383616) return ps::admissionRefuse(failure, "executable_size", "size_mismatch");
     executable.resize(static_cast<std::size_t>(size.QuadPart));
     DWORD count = 0;
-    if (!ReadFile(executableFile, executable.data(), static_cast<DWORD>(executable.size()), &count, nullptr) || count != executable.size()) return false;
+    const BOOL readOkay = ReadFile(executableFile, executable.data(), static_cast<DWORD>(executable.size()), &count, nullptr);
+    const DWORD readError = readOkay ? ERROR_SUCCESS : GetLastError();
+    if (!readOkay || count != executable.size()) {
+        failure.requested = static_cast<DWORD>(executable.size()); failure.transferred = count;
+        return ps::admissionRefuse(failure, "executable_read", readOkay ? "read_incomplete" : "read_failed", readError);
+    }
     BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0))) return false;
+    const auto opened = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+    if (!BCRYPT_SUCCESS(opened)) {
+        failure.status = static_cast<unsigned long>(opened);
+        return ps::admissionRefuse(failure, "sha256_provider", "bcrypt_failed");
+    }
     std::array<std::byte, 32> digest{};
     const auto result = BCryptHash(algorithm, nullptr, 0, reinterpret_cast<PUCHAR>(executable.data()),
         static_cast<ULONG>(executable.size()), reinterpret_cast<PUCHAR>(digest.data()), static_cast<ULONG>(digest.size()));
     BCryptCloseAlgorithmProvider(algorithm, 0);
-    return BCRYPT_SUCCESS(result) && grandmp::windows::recognizeGameVersion(
-        grandmp::windows::inspectExecutable(executable), digest) == grandmp::windows::GameVersion::gta_sa_10us_hoodlum && codeMatches();
+    if (!BCRYPT_SUCCESS(result)) {
+        failure.status = static_cast<unsigned long>(result);
+        return ps::admissionRefuse(failure, "sha256", "bcrypt_failed");
+    }
+    if (grandmp::windows::recognizeGameVersion(grandmp::windows::inspectExecutable(executable), digest) !=
+        grandmp::windows::GameVersion::gta_sa_10us_hoodlum)
+        return ps::admissionRefuse(failure, "executable_identity", "hoodlum_profile_mismatch");
+    hoodlumIdentityAuthenticated.store(true, std::memory_order_release);
+    if (!codeMatches(&failure.code)) return ps::admissionRefuse(failure, "live_code", failure.code.category, failure.code.error);
+    return true;
+}
+void logAdmissionFailure(const ps::AdmissionFailure& failure) noexcept {
+    char detail[352]{};
+    if (ps::formatAdmissionFailure(detail, sizeof(detail), failure)) writeLog("failed", detail);
+    else writeLog("failed", "admission_diagnostic_format_failed");
+    if (std::strcmp(failure.code.category, "none")) {
+        if (ps::formatCodeIdentityFailure(detail, sizeof(detail), failure.code)) writeLog("failed", detail);
+        else writeLog("failed", "admission_code_diagnostic_format_failed");
+    }
 }
 
 bool playerReady(void*& ped, ps::Position* position = nullptr, ps::Position* right = nullptr, bool diagnose = false) noexcept {
@@ -499,6 +769,9 @@ struct NativeEngine {
 #endif // Legacy civil experiment
 #if defined(GRANDMP_CPLAYER_VARIANT)
 #include "native_player_runtime.inl"
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+#include "background_gameplay_runtime.inl"
+#endif
 #endif
 
 #if defined(GRANDMP_REMOTE_PED_VARIANT)
@@ -514,12 +787,18 @@ void runPhase(std::uintptr_t caller) noexcept {
     if (callbacks.fetch_add(1, std::memory_order_relaxed) == 0) writeLog("waiting", "callback_executed");
     if (preparation.load() != 3) return; // Do not spawn while publication/protection checks are still in progress.
     if (!phaseThreadMatches(caller)) {
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+        bg::close(); // Do not touch engine-thread diagnostic state from an unknown caller.
+#endif
 #if defined(GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TASK_DIAGNOSTIC_BUILD == 1
         stopTaskDiagnostic();
 #endif
         runtimeDisabled.store(true); writeLog("failed", "wrong_phase_caller_or_thread"); return;
     }
     if (runtimeDisabled.load()) {
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+        bg::close(); backgroundReport();
+#endif
 #if defined(GRANDMP_NATIVE_INPUT_REPLAY_BUILD) && GRANDMP_NATIVE_INPUT_REPLAY_BUILD == 1
         inputReport(); // Deferred until the existing admitted phase; never in the control wrapper.
 #endif
@@ -544,6 +823,9 @@ void runPhase(std::uintptr_t caller) noexcept {
     const bool commonMatches = codeMatches(&commonFailure);
     const bool factoryMatches = factoryCodeMatches(&factoryFailure); // Evaluate independently, even if common failed.
     if (!commonMatches || !factoryMatches) {
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+        backgroundStop("phase_code_identity");
+#endif
         runtimeDisabled.store(true); // Close dispatch BEFORE emitting the one terminal diagnostic.
         writeLog("failed", commonMatches ? "codeMatches=pass factoryCodeMatches=fail" :
             factoryMatches ? "codeMatches=fail factoryCodeMatches=pass" : "codeMatches=fail factoryCodeMatches=fail");
@@ -575,6 +857,9 @@ void runPhase(std::uintptr_t caller) noexcept {
 #endif
     void* cj = nullptr;
     const bool gameplay = playerReady(cj) && streamingReady();
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+    backgroundReport(); // Deferred: no logging inside UpdatePads or WndProc.
+#endif
 #if defined(GRANDMP_CPLAYER_VARIANT)
     nativeTick(gameplay);
 #elif defined(GRANDMP_REMOTE_PED_VARIANT)
@@ -666,35 +951,44 @@ ps::InstallOutcome installCandidate() {
     if (!codeMatches()) return fail(ps::InstallFailure::candidate_code_identity_mismatch);
     if (!ps::encodePhaseCall(reinterpret_cast<std::uintptr_t>(&ps::phaseThunk), installedCall))
         return fail(ps::InstallFailure::candidate_call_encoding_failed);
-    DWORD protection = 0;
-    auto* entry = reinterpret_cast<void*>(ps::phaseCall);
-    const BOOL writable = VirtualProtect(entry, installedCall.size(), PAGE_EXECUTE_READWRITE, &protection);
-    const DWORD writableError = writable ? ERROR_SUCCESS : GetLastError();
-    if (!writable) return win32Fail(ps::InstallFailure::candidate_virtual_protect_failed, writableError);
-    if (protection != PAGE_EXECUTE_READ) {
-        DWORD ignored = 0;
-        const BOOL restored = VirtualProtect(entry, installedCall.size(), protection, &ignored);
-        const DWORD restoreError = restored ? ERROR_SUCCESS : GetLastError();
-        auto result = fail(ps::InstallFailure::candidate_unexpected_page_protection);
-        if (!restored) result.candidateCleanup = {ps::InstallFailure::candidate_initial_protection_restore_failed, restoreError, true};
+    const auto backend = ps::patch_transaction::win32Backend(nullptr, authorizeCowPatch);
+    const auto write = ps::patch_transaction::apply(backend, ps::phaseCall,
+        std::span<const std::byte>(ps::originalCall), std::span<const std::byte>(installedCall),
+        hoodlumIdentityAuthenticated.load(std::memory_order_acquire));
+    if (!write) {
+        ps::InstallOutcome result{};
+        const auto failure = write.failure;
+        const auto primary = failure == ps::patch_transaction::Failure::unexpected_protection
+            ? ps::InstallFailure::candidate_unexpected_page_protection
+            : failure == ps::patch_transaction::Failure::protect_failed
+                ? ps::InstallFailure::candidate_virtual_protect_failed
+                : failure == ps::patch_transaction::Failure::flush_failed
+                    ? ps::InstallFailure::candidate_instruction_cache_flush_failed
+                    : failure == ps::patch_transaction::Failure::protection_restore_failed ||
+                      failure == ps::patch_transaction::Failure::restore_transition_mismatch ||
+                      failure == ps::patch_transaction::Failure::post_restore_page
+                        ? ps::InstallFailure::candidate_protection_restore_failed
+                        : failure == ps::patch_transaction::Failure::write_failed ||
+                          failure == ps::patch_transaction::Failure::write_partial
+                            ? ps::InstallFailure::candidate_code_write_failed
+                            : ps::InstallFailure::candidate_code_identity_mismatch;
+        result.primary = {primary, write.error, write.error != ERROR_SUCCESS};
+        if (!write.rollbackComplete && (write.cleanupError != ERROR_SUCCESS || write.bytesChanged || write.rollbackAttempted))
+            result.candidateCleanup = {ps::InstallFailure::candidate_code_rollback_failed,
+                write.cleanupError ? write.cleanupError : ERROR_INVALID_DATA, true};
         return result;
     }
-    std::memcpy(entry, installedCall.data(), installedCall.size());
-    hookPublished.store(true);
-    const BOOL flushed = FlushInstructionCache(GetCurrentProcess(), entry, installedCall.size());
-    const DWORD flushError = flushed ? ERROR_SUCCESS : GetLastError();
-    DWORD ignored = 0;
-    const BOOL restored = VirtualProtect(entry, installedCall.size(), protection, &ignored);
-    const DWORD restoreError = restored ? ERROR_SUCCESS : GetLastError();
-    if (!flushed || !restored) {
-        auto result = !flushed
-            ? win32Fail(ps::InstallFailure::candidate_instruction_cache_flush_failed, flushError)
-            : win32Fail(ps::InstallFailure::candidate_protection_restore_failed, restoreError);
-        if (!restored && !flushed)
-            result.candidateCleanup = {ps::InstallFailure::candidate_protection_restore_failed, restoreError, true};
-        return result; // Immutable original remains available; no unload/automatic repair.
+    hookPublished.store(true, std::memory_order_release);
+    if (!codeMatches()) {
+        const auto rollback = ps::patch_transaction::apply(backend, ps::phaseCall,
+            std::span<const std::byte>(installedCall), std::span<const std::byte>(ps::originalCall),
+            hoodlumIdentityAuthenticated.load(std::memory_order_acquire));
+        if (rollback) hookPublished.store(false, std::memory_order_release);
+        auto result = fail(ps::InstallFailure::candidate_post_publish_code_mismatch);
+        if (!rollback) result.candidateCleanup = {ps::InstallFailure::candidate_code_rollback_failed,
+            rollback.cleanupError ? rollback.cleanupError : rollback.error, true};
+        return result;
     }
-    if (!codeMatches()) return fail(ps::InstallFailure::candidate_post_publish_code_mismatch);
     return {};
 }
 
@@ -705,6 +999,9 @@ LRESULT CALLBACK installMessage(int code, WPARAM word, LPARAM message) {
         storeCandidateOutcome(outcome);
 #if defined(GRANDMP_CPLAYER_VARIANT)
         if (outcome.succeeded() && !prepareNativeBinding()) runtimeDisabled.store(true);
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+        if (outcome.succeeded() && !runtimeDisabled.load() && !installBackground()) runtimeDisabled.store(true);
+#endif
 #endif
         installation.store(3);
     }
@@ -770,6 +1067,8 @@ ps::InstallOutcome installOnGameThread() {
 }
 
 DWORD WINAPI prepare(void* reference) {
+    BOOT_NOTE(prepare,entered);
+    ps::AdmissionFailure admissionFailure{};
     try {
         writeLog("loaded", "experimental_module_no_engine_calls_in_loader");
         writeLog("waiting", "preparation_read_only");
@@ -783,7 +1082,8 @@ DWORD WINAPI prepare(void* reference) {
         ) {
             writeLog("waiting", "installation_blocked_physical_execution_review_missing");
             preparation.store(2);
-        } else if (!admitExecutable()) {
+        } else if (!admitExecutable(&admissionFailure)) {
+            logAdmissionFailure(admissionFailure);
             writeLog("failed", "hoodlum_identity_path_or_live_signature");
             preparation.store(4);
         } else {
@@ -826,6 +1126,9 @@ DWORD WINAPI prepare(void* reference) {
                 logInstallDiagnostic(installOutcome.candidateCleanup);
                 logInstallDiagnostic(installOutcome.unhookFailure);
                 bool installed = installOutcome.succeeded();
+#if defined(GRANDMP_BACKGROUND_GAMEPLAY_BUILD) && GRANDMP_BACKGROUND_GAMEPLAY_BUILD == 1
+                backgroundReport(); // Preparation worker, after bootstrap publication.
+#endif
 #if defined(GRANDMP_CPLAYER_VARIANT)
                 if (installed && (runtimeDisabled.load() || !startNativeNetwork())) { runtimeDisabled.store(true);installed=false; }
 #endif
@@ -851,6 +1154,7 @@ DWORD WINAPI prepare(void* reference) {
         CloseHandle(executableFile);
         executableFile = INVALID_HANDLE_VALUE;
     }
+    BOOT_NOTE(prepare_exit,succeeded,0,static_cast<LONG>(preparation.load()));
     FreeLibraryAndExitThread(static_cast<HMODULE>(reference), 0);
 }
 } // namespace
@@ -861,21 +1165,48 @@ void __cdecl phaseBody(std::uintptr_t caller) noexcept { runPhase(caller); }
 }
 
 extern "C" void __cdecl InitializeASI() noexcept {
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+    InterlockedIncrement(&GrandMPNativePlayerBootstrapDiagnostic.initializeCalls);
+#endif
     unsigned expected = 0;
     if (!preparation.compare_exchange_strong(expected, 1)) return;
+    BOOT_NOTE(initialize,entered);
     HMODULE reference = nullptr;
+    BOOT_NOTE(reference,entered);
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&InitializeASI), &reference)) {
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+        const DWORD error=GetLastError();
+        BOOT_NOTE(reference,failed,error);
+        BOOT_NOTE(initialize_exit,failed);
+#endif
         preparation.store(4);
         return;
     }
+    BOOT_NOTE(reference,succeeded,0,reference==module ? 1 : 2);
+    BOOT_NOTE(thread,entered);
     const HANDLE worker = CreateThread(nullptr, 0, prepare, reference, 0, nullptr);
-    if (!worker) { preparation.store(4); FreeLibrary(reference); return; }
+    if (!worker) {
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+        const DWORD error=GetLastError();
+        BOOT_NOTE(thread,failed,error);
+        BOOT_NOTE(initialize_exit,failed);
+#endif
+        preparation.store(4); FreeLibrary(reference); return;
+    }
+    BOOT_NOTE(thread,succeeded);
     CloseHandle(worker); // Preparation only. No thread ever drives gameplay.
+    BOOT_NOTE(initialize_exit,succeeded);
 }
 extern "C" unsigned __cdecl GrandMPPedSmokeStatus() noexcept { return preparation.load(); }
 extern "C" unsigned __cdecl GrandMPPedSmokeCallbackCount() noexcept { return callbacks.load(); }
 extern "C" void __cdecl GrandMPPedSmokeRequestRemoval() noexcept { removalRequested.store(true); }
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) module = instance;
+    if (reason == DLL_PROCESS_ATTACH) {
+        module = instance;
+#if defined(GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD) && GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD == 1
+        // Own, constant-initialized DATA only. No I/O, thread, wait or loader API.
+        InterlockedExchange(&GrandMPNativePlayerBootstrapDiagnostic.attached,1);
+#endif
+    }
     return TRUE;
 }

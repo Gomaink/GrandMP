@@ -1,4 +1,32 @@
 if(BUILD_TESTING)
+    add_executable(grandmp_ipv4_endpoint_tests ipv4_endpoint_tests.cpp)
+    target_link_libraries(grandmp_ipv4_endpoint_tests PRIVATE GrandMP::Shared)
+    if(MSVC)
+        target_compile_options(grandmp_ipv4_endpoint_tests PRIVATE /W4 /WX /EHsc)
+    endif()
+    add_test(NAME ipv4_endpoint_policy COMMAND grandmp_ipv4_endpoint_tests)
+    if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+        add_executable(grandmp_patch_transaction_tests patch_transaction_tests.cpp)
+        target_compile_features(grandmp_patch_transaction_tests PRIVATE cxx_std_20)
+        target_compile_options(grandmp_patch_transaction_tests PRIVATE /W4 /WX /EHsc /JMC-)
+        target_link_libraries(grandmp_patch_transaction_tests PRIVATE psapi)
+        foreach(writer_case rx_success cow_success reject preimage partial flush_restore rollback_failure restore_failure unknown_post
+                safety_gap_publish5 safety_gap_publish6 safety_gap_rollback5 safety_gap_rollback6)
+            add_test(NAME patch_transaction_${writer_case} COMMAND grandmp_patch_transaction_tests ${writer_case})
+            set_tests_properties(patch_transaction_${writer_case} PROPERTIES TIMEOUT 10)
+        endforeach()
+    endif()
+    # Pure offline parser/comparison tests; this executable never opens a process.
+    if(WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND GRANDMP_BUILD_ALPHA09_HOODLUM_MEMORY_READER)
+        add_executable(grandmp_alpha09_hoodlum_memory_reader_tests alpha09_hoodlum_memory_reader_tests.cpp)
+        target_compile_features(grandmp_alpha09_hoodlum_memory_reader_tests PRIVATE cxx_std_20)
+        target_compile_options(grandmp_alpha09_hoodlum_memory_reader_tests PRIVATE /W4 /WX /EHsc /JMC-)
+        set_target_properties(grandmp_alpha09_hoodlum_memory_reader_tests PROPERTIES
+            MSVC_RUNTIME_LIBRARY "MultiThreadedDebug")
+        add_test(NAME alpha09_hoodlum_memory_reader_offline
+            COMMAND grandmp_alpha09_hoodlum_memory_reader_tests)
+        set_tests_properties(alpha09_hoodlum_memory_reader_offline PROPERTIES TIMEOUT 10)
+    endif()
     add_executable(grandmp_remote_player_controller_tests remote_player_controller_tests.cpp)
     target_link_libraries(grandmp_remote_player_controller_tests PRIVATE grandmp_server_sessions)
     if(WIN32)
@@ -531,7 +559,10 @@ if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_compile_options(grandmp_remote_player_binding_tests PRIVATE /W4 /WX /EHsc)
     target_link_libraries(grandmp_remote_player_binding_tests PRIVATE GrandMP::Shared grandmp_windows_detection bcrypt)
     foreach(player_binding_case gate contract partial_create absent_create pipeline freshness duplicates reentry thread ownership dispatch
-            replay_contract cleanup cleanup_unknown generation capture apply exception restore seh pad_image persistent)
+            replay_contract cleanup cleanup_unknown generation capture apply exception restore seh pad_image persistent
+            dispatch_identity dispatch_identity_thread dispatch_identity_retired
+            trace_success trace_capture trace_apply trace_before_original trace_original trace_combined trace_exception trace_seh trace_context trace_capture_seh
+            proof_source proof_timeout semantic_sequence semantic_clock semantic_unknown semantic_combined semantic_restore semantic_post_identity semantic_original)
         add_test(NAME remote_player_binding_${player_binding_case}
             COMMAND grandmp_remote_player_binding_tests ${player_binding_case})
     endforeach()
@@ -544,6 +575,50 @@ if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
 endif()
 
 if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    add_executable(grandmp_remote_player_foundation_tests remote_player_foundation_tests.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/pooled_remote_player.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp)
+    target_compile_options(grandmp_remote_player_foundation_tests PRIVATE /W4 /WX /EHsc /JMC-)
+    target_compile_definitions(grandmp_remote_player_foundation_tests PRIVATE GRANDMP_POOLED_REMOTE_PLAYER_BUILD=0)
+    target_link_libraries(grandmp_remote_player_foundation_tests PRIVATE GrandMP::Shared)
+    target_include_directories(grandmp_remote_player_foundation_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    foreach(foundation_case closed private_table private_race step controller group_ownership processing_mailbox processing_race processing_log
+            factory_observation factory_preconditions factory_log proof_format pad_trace_log)
+        add_test(NAME remote_player_foundation_${foundation_case} COMMAND grandmp_remote_player_foundation_tests ${foundation_case})
+    endforeach()
+    add_executable(grandmp_remote_player_foundation_context_tests remote_player_foundation_tests.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/pooled_remote_player.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp)
+    target_compile_options(grandmp_remote_player_foundation_context_tests PRIVATE /W4 /WX /EHsc /JMC-)
+    target_compile_definitions(grandmp_remote_player_foundation_context_tests PRIVATE GRANDMP_POOLED_REMOTE_PLAYER_BUILD=1)
+    target_link_libraries(grandmp_remote_player_foundation_context_tests PRIVATE GrandMP::Shared)
+    target_include_directories(grandmp_remote_player_foundation_context_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    add_test(NAME remote_player_foundation_runtime_context COMMAND grandmp_remote_player_foundation_context_tests runtime_context)
+    add_test(NAME remote_player_foundation_factory_context COMMAND grandmp_remote_player_foundation_context_tests factory_context)
+    # D1 compiles its real diagnostic capture branch, with all native execution closed.
+    add_executable(grandmp_remote_tail_diagnostic_tests remote_tail_diagnostic_tests.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/pooled_remote_player.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp)
+    target_compile_options(grandmp_remote_tail_diagnostic_tests PRIVATE /W4 /WX /EHsc /JMC-)
+    target_compile_definitions(grandmp_remote_tail_diagnostic_tests PRIVATE GRANDMP_POOLED_REMOTE_PLAYER_BUILD=0
+        GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD=1 GRANDMP_AUTHENTICATED_PAD_COW_BUILD=1 GRANDMP_REMOTE_TAIL_DIAGNOSTIC_BUILD=1)
+    target_include_directories(grandmp_remote_tail_diagnostic_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    target_link_libraries(grandmp_remote_tail_diagnostic_tests PRIVATE GrandMP::Shared bcrypt)
+    foreach(tail_case equal boundaries touched bounded unknown_clock format async_log closed_context)
+        add_test(NAME remote_tail_diagnostic_${tail_case} COMMAND grandmp_remote_tail_diagnostic_tests ${tail_case})
+    endforeach()
+    add_executable(grandmp_semantic_pad_context_tests remote_tail_diagnostic_tests.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/pooled_remote_player.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp)
+    target_compile_options(grandmp_semantic_pad_context_tests PRIVATE /W4 /WX /EHsc /JMC-)
+    target_compile_definitions(grandmp_semantic_pad_context_tests PRIVATE GRANDMP_POOLED_REMOTE_PLAYER_BUILD=0
+        GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD=1 GRANDMP_AUTHENTICATED_PAD_COW_BUILD=1
+        GRANDMP_REMOTE_TAIL_DIAGNOSTIC_BUILD=1 GRANDMP_SEMANTIC_PAD_CONTEXT_BUILD=1)
+    target_include_directories(grandmp_semantic_pad_context_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    target_link_libraries(grandmp_semantic_pad_context_tests PRIVATE GrandMP::Shared bcrypt)
+    foreach(semantic_case semantic_positive semantic_other_bytes semantic_clock semantic_identity semantic_full_value semantic_diagnostics closed_context)
+        add_test(NAME semantic_pad_context_${semantic_case} COMMAND grandmp_semantic_pad_context_tests ${semantic_case})
+    endforeach()
     add_executable(grandmp_native_second_player_tests native_second_player_tests.cpp
         ${PROJECT_SOURCE_DIR}/client/windows/src/native_second_player.cpp)
     target_compile_options(grandmp_native_second_player_tests PRIVATE /W4 /WX /EHsc)
@@ -554,7 +629,10 @@ if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
             partial_factory wrong_type local_mutation register_failure identity ownership handle vehicle reference
             cleanup cleanup_unknown slot_not_cleared cleanup_call_failure binding late_occupancy cleanup_replacement model
             command_encoding command_position command_refused partial_published
-            group_initial group_resources group_members finish_partial collision_volume binding_partial control_auth_only)
+            group_initial group_resources group_members finish_partial collision_volume binding_partial control_auth_only
+            local_capture_identity local_capture_context local_capture_partial local_capture_generation
+            control_identity_valid control_identity_denied control_identity_partial control_identity_thread
+            diag_windows_closed diag_true_empty diag_false_empty diag_false_published diag_post_slot_read diag_complete)
         add_test(NAME native_second_player_${slot_case} COMMAND grandmp_native_second_player_tests ${slot_case})
     endforeach()
 endif()
@@ -675,16 +753,81 @@ endif()
 
 # Code identity diagnostics: offline memory/file probes only, no game or DLL execution.
 if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    foreach(bootstrap_gate 0 1)
+        add_executable(grandmp_native_player_bootstrap_${bootstrap_gate}_tests native_player_bootstrap_tests.cpp
+            ${PROJECT_SOURCE_DIR}/client/windows/src/native_second_player.cpp
+            ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp
+            ${PROJECT_SOURCE_DIR}/client/windows/src/observer_network.cpp)
+        target_compile_options(grandmp_native_player_bootstrap_${bootstrap_gate}_tests PRIVATE /JMC- /W4 /WX /EHsc)
+        target_compile_definitions(grandmp_native_player_bootstrap_${bootstrap_gate}_tests PRIVATE
+            GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD=${bootstrap_gate} GRANDMP_CPLAYER_VARIANT=1
+            GRANDMP_NATIVE_INPUT_REPLAY_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1 GRANDMP_BACKGROUND_GAMEPLAY_BUILD=1
+            GRANDMP_PED_SMOKE_PHYSICAL_BUILD=0 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0)
+        target_include_directories(grandmp_native_player_bootstrap_${bootstrap_gate}_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+        target_link_libraries(grandmp_native_player_bootstrap_${bootstrap_gate}_tests PRIVATE GrandMP::Shared grandmp_windows_detection bcrypt user32 ws2_32)
+    endforeach()
+    add_test(NAME native_bootstrap_off COMMAND grandmp_native_player_bootstrap_0_tests success)
+    foreach(bootstrap_case entry reference thread delayed success path truncated file write partial concurrent)
+        add_test(NAME native_bootstrap_${bootstrap_case} COMMAND grandmp_native_player_bootstrap_1_tests ${bootstrap_case})
+        set_tests_properties(native_bootstrap_${bootstrap_case} PROPERTIES TIMEOUT 10)
+    endforeach()
+    # Actual DLL + actual UAL, in disposable own-host directories only. All game execution CLOSED.
+    add_library(grandmp_bootstrap_closed MODULE EXCLUDE_FROM_ALL ${PROJECT_SOURCE_DIR}/client/windows/tools/ped_smoke.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/tools/NativePlayerSyncBootstrapDiagnostic.def
+        ${PROJECT_SOURCE_DIR}/client/windows/src/native_second_player.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/observer_network.cpp)
+    target_compile_options(grandmp_bootstrap_closed PRIVATE /JMC- /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_bootstrap_closed PRIVATE GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD=1 GRANDMP_CPLAYER_VARIANT=1
+        GRANDMP_NATIVE_INPUT_REPLAY_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1 GRANDMP_BACKGROUND_GAMEPLAY_BUILD=1
+        GRANDMP_PED_SMOKE_PHYSICAL_BUILD=0 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0)
+    target_include_directories(grandmp_bootstrap_closed PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    target_link_libraries(grandmp_bootstrap_closed PRIVATE GrandMP::Shared grandmp_windows_detection bcrypt user32 ws2_32)
+    set_target_properties(grandmp_bootstrap_closed PROPERTIES PREFIX "" SUFFIX ".asi" OUTPUT_NAME GrandMPNativePlayerSyncExperimental
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bootstrap-closed")
+    add_executable(grandmp_native_player_bootstrap_host native_player_bootstrap_host.cpp)
+    target_compile_features(grandmp_native_player_bootstrap_host PRIVATE cxx_std_20)
+    target_compile_options(grandmp_native_player_bootstrap_host PRIVATE /W4 /WX /EHsc)
+    set(GRANDMP_BOOTSTRAP_TEST_UAL_FILE "" CACHE FILEPATH "Optional pinned UAL 7.7.0 for disposable, physically closed bootstrap tests")
+    if(Python3_Interpreter_FOUND AND GRANDMP_BOOTSTRAP_TEST_UAL_FILE)
+        foreach(ual_case normal preloaded)
+            add_test(NAME native_bootstrap_ual_${ual_case} COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/native_player_bootstrap_ual.py
+                $<TARGET_FILE:grandmp_native_player_bootstrap_host> $<TARGET_FILE:grandmp_bootstrap_closed>
+                ${GRANDMP_BOOTSTRAP_TEST_UAL_FILE} ${ual_case} ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-fixtures)
+            set_tests_properties(native_bootstrap_ual_${ual_case} PROPERTIES TIMEOUT 20)
+        endforeach()
+    endif()
     add_executable(grandmp_code_identity_tests code_identity_tests.cpp)
     target_compile_features(grandmp_code_identity_tests PRIVATE cxx_std_20)
     target_compile_options(grandmp_code_identity_tests PRIVATE /W4 /WX /EHsc)
     target_link_libraries(grandmp_code_identity_tests PRIVATE bcrypt)
     add_executable(grandmp_native_player_replay_tests native_player_replay_tests.cpp
         ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp)
+    add_executable(grandmp_native_pad_contract_tests native_pad_contract_tests.cpp)
+    target_compile_features(grandmp_native_pad_contract_tests PRIVATE cxx_std_20)
+    target_compile_options(grandmp_native_pad_contract_tests PRIVATE /W4 /WX /EHsc /JMC-)
+    target_include_directories(grandmp_native_pad_contract_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include ${PROJECT_SOURCE_DIR}/shared/include)
+    target_link_libraries(grandmp_native_pad_contract_tests PRIVATE bcrypt)
+    target_link_options(grandmp_native_pad_contract_tests PRIVATE /SECTION:.gmcow,ERW)
+    if(GRANDMP_HOODLUM_AUDIT_FILE)
+        foreach(pad_contract_case identity mapping range live generic)
+            add_test(NAME native_pad_contract_${pad_contract_case} COMMAND grandmp_native_pad_contract_tests ${pad_contract_case} "${GRANDMP_HOODLUM_AUDIT_FILE}")
+        endforeach()
+    endif()
+    # Compile the exceptional backend branch, with native execution CLOSED.
+    add_library(grandmp_native_pad_contract_compile OBJECT EXCLUDE_FROM_ALL ${PROJECT_SOURCE_DIR}/client/windows/src/pooled_remote_player.cpp)
+    target_compile_features(grandmp_native_pad_contract_compile PRIVATE cxx_std_20)
+    target_compile_options(grandmp_native_pad_contract_compile PRIVATE /W4 /WX /EHsc /JMC-)
+    target_include_directories(grandmp_native_pad_contract_compile PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include ${PROJECT_SOURCE_DIR}/shared/include)
+    target_compile_definitions(grandmp_native_pad_contract_compile PRIVATE GRANDMP_POOLED_REMOTE_PLAYER_BUILD=0 GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD=1 GRANDMP_AUTHENTICATED_PAD_COW_BUILD=1)
     target_compile_options(grandmp_native_player_replay_tests PRIVATE /JMC- /W4 /WX /EHsc)
     target_link_libraries(grandmp_native_player_replay_tests PRIVATE GrandMP::Shared)
     target_include_directories(grandmp_native_player_replay_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
-    foreach(replay_case gate basis neutral invalid mismatch tamper dispatch pad_scope pad_exception pad_seh pad_context)
+    foreach(replay_case gate basis neutral invalid mismatch tamper dispatch pad_scope pad_exception pad_seh pad_context dispatch_roles cleo_scheduler cleo_diagnostics cleo_script_name cleo_installation_paths
+            cleo_cell_rw cleo_cell_mismatch cleo_cell_misaligned cleo_cell_badpage cleo_cell_tamper cleo_cell_protection_change
+            cleo_cell_readonly cleo_cell_wrongbase cleo_init_diagnostics cleo_guard_redaction cleo_factory_diagnostics
+            pad_diagnostic_success pad_diagnostic_context pad_diagnostic_query pad_diagnostic_private pad_diagnostic_base pad_diagnostic_protection pad_diagnostic_bounds)
         add_test(NAME native_player_replay_${replay_case} COMMAND grandmp_native_player_replay_tests ${replay_case})
     endforeach()
     # Compile the actual replay runtime with ALL execution gates closed, no DLL.
@@ -695,12 +838,37 @@ if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
         GRANDMP_NATIVE_INPUT_REPLAY_BUILD=1 GRANDMP_PED_SMOKE_PHYSICAL_BUILD=0 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0)
     target_include_directories(grandmp_native_player_replay_compile PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
     target_link_libraries(grandmp_native_player_replay_compile PRIVATE GrandMP::Shared)
-    foreach(identity_case callback first read format pages)
+    foreach(identity_case callback first read format pages cow cow_rejections)
         add_test(NAME code_identity_${identity_case} COMMAND grandmp_code_identity_tests ${identity_case})
     endforeach()
     set(GRANDMP_CODE_IDENTITY_IMAGE_FILE "" CACHE FILEPATH "Optional exact Hoodlum file for non-executing image mapping test")
     if(GRANDMP_CODE_IDENTITY_IMAGE_FILE)
         add_test(NAME code_identity_image COMMAND grandmp_code_identity_tests image "${GRANDMP_CODE_IDENTITY_IMAGE_FILE}")
+    endif()
+    # Actual admission routine, execution gates CLOSED; no game image is loaded.
+    add_executable(grandmp_admission_diagnostics_tests admission_diagnostics_tests.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/native_second_player.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/observer_network.cpp)
+    target_compile_options(grandmp_admission_diagnostics_tests PRIVATE /JMC- /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_admission_diagnostics_tests PRIVATE
+        GRANDMP_BOOTSTRAP_DIAGNOSTIC_BUILD=1 GRANDMP_CPLAYER_VARIANT=1
+        GRANDMP_NATIVE_INPUT_REPLAY_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1 GRANDMP_BACKGROUND_GAMEPLAY_BUILD=1
+        GRANDMP_PED_SMOKE_PHYSICAL_BUILD=0 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0)
+    target_include_directories(grandmp_admission_diagnostics_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    target_link_libraries(grandmp_admission_diagnostics_tests PRIVATE GrandMP::Shared grandmp_windows_detection bcrypt user32 ws2_32)
+    add_test(NAME native_admission_format COMMAND grandmp_admission_diagnostics_tests format)
+    if(GRANDMP_CODE_IDENTITY_IMAGE_FILE)
+        foreach(admission_case own_path own_truncated game_path game_truncated module_missing image_base
+                own_canonical game_canonical own_mismatch game_mismatch pair open size_read size
+                  file_read file_partial provider hash identity live_read live_partial live_page live_bytes
+                  live_cow live_cow_page2_bad live_cow_page2_type live_cow_page2_base live_cow_page2_alloc_protect
+                  live_cow_page2_span live_cow_ws_failed live_cow_ws_invalid live_cow_private_before_patch
+                  live_cow_bytes live_cow_partial post_hook success)
+            add_test(NAME native_admission_${admission_case} COMMAND grandmp_admission_diagnostics_tests
+                ${admission_case} "${GRANDMP_CODE_IDENTITY_IMAGE_FILE}")
+            set_tests_properties(native_admission_${admission_case} PROPERTIES TIMEOUT 10)
+        endforeach()
     endif()
     # Compile the real CPLAYER branch with execution gates OFF. No ASI is linked.
     add_library(grandmp_native_player_identity_compile OBJECT EXCLUDE_FROM_ALL
@@ -711,4 +879,60 @@ if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
         GRANDMP_CPLAYER_VARIANT=1 GRANDMP_PED_SMOKE_PHYSICAL_BUILD=0 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0)
     target_include_directories(grandmp_native_player_identity_compile PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
     target_link_libraries(grandmp_native_player_identity_compile PRIVATE GrandMP::Shared)
+
+    # Compile the actual Alpha 0.9 producer/worker without any physical execution.
+    add_library(grandmp_native_player_sync_compile OBJECT EXCLUDE_FROM_ALL
+        ${PROJECT_SOURCE_DIR}/client/windows/tools/ped_smoke.cpp)
+    target_compile_options(grandmp_native_player_sync_compile PRIVATE /JMC- /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_native_player_sync_compile PRIVATE GRANDMP_CPLAYER_VARIANT=1
+        GRANDMP_NATIVE_INPUT_REPLAY_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1
+        GRANDMP_PED_SMOKE_PHYSICAL_BUILD=0 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0)
+    target_include_directories(grandmp_native_player_sync_compile PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    target_link_libraries(grandmp_native_player_sync_compile PRIVATE GrandMP::Shared)
+
+    # Compile the new integration ON with factory/spawn execution still closed.
+    # No DLL is produced or loaded by this target.
+    add_library(grandmp_background_gameplay_compile OBJECT EXCLUDE_FROM_ALL
+        ${PROJECT_SOURCE_DIR}/client/windows/tools/ped_smoke.cpp)
+    target_compile_options(grandmp_background_gameplay_compile PRIVATE /JMC- /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_background_gameplay_compile PRIVATE GRANDMP_CPLAYER_VARIANT=1
+        GRANDMP_NATIVE_INPUT_REPLAY_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1 GRANDMP_BACKGROUND_GAMEPLAY_BUILD=1
+        GRANDMP_PED_SMOKE_PHYSICAL_BUILD=0 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0)
+    target_include_directories(grandmp_background_gameplay_compile PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    target_link_libraries(grandmp_background_gameplay_compile PRIVATE GrandMP::Shared)
+    add_executable(grandmp_background_gameplay_tests background_gameplay_tests.cpp)
+    target_compile_options(grandmp_background_gameplay_tests PRIVATE /JMC- /W4 /WX /EHsc)
+    target_link_options(grandmp_background_gameplay_tests PRIVATE /INCREMENTAL:NO)
+    target_link_libraries(grandmp_background_gameplay_tests PRIVATE GrandMP::Shared)
+    target_include_directories(grandmp_background_gameplay_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    foreach(background_case gate thunk pad context refusal mismatch overlay dispatch)
+        add_test(NAME background_gameplay_${background_case} COMMAND grandmp_background_gameplay_tests ${background_case})
+    endforeach()
+    # Counterexamples to the current publication contract. These passing cases
+    # document NO-GO and deliberately do not execute partially written stubs.
+    foreach(publication_fault query read protect write partial flush restore restore_always post_readback post_match)
+        foreach(publication_site RANGE 0 2)
+            set(publication_case "safety_gap_${publication_fault}_${publication_site}")
+            add_test(NAME background_gameplay_${publication_case}
+                COMMAND grandmp_background_gameplay_tests ${publication_case})
+            set_tests_properties(background_gameplay_${publication_case} PROPERTIES TIMEOUT 10)
+        endforeach()
+    endforeach()
+
+    add_executable(grandmp_real_client_sync_tests real_client_sync_tests.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/observer_network.cpp)
+    target_compile_options(grandmp_real_client_sync_tests PRIVATE /W4 /WX /EHsc)
+    target_link_libraries(grandmp_real_client_sync_tests PRIVATE GrandMP::Shared grandmp_server_sessions ws2_32 bcrypt)
+    target_include_directories(grandmp_real_client_sync_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    foreach(sync_case pad capture mailbox contention endpoint source)
+        add_test(NAME real_client_sync_${sync_case} COMMAND grandmp_real_client_sync_tests ${sync_case})
+    endforeach()
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME real_client_sync_duplex_udp COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/real_client_sync_loopback.py $<TARGET_FILE:grandmp_server> $<TARGET_FILE:grandmp_real_client_sync_tests>)
+        set_tests_properties(real_client_sync_duplex_udp PROPERTIES TIMEOUT 25)
+        add_test(NAME real_client_sync_lan_endpoint_udp COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/real_client_sync_loopback.py $<TARGET_FILE:grandmp_server> $<TARGET_FILE:grandmp_real_client_sync_tests> lan)
+        set_tests_properties(real_client_sync_lan_endpoint_udp PROPERTIES TIMEOUT 25)
+    endif()
 endif()

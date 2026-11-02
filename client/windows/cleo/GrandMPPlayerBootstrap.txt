@@ -1,0 +1,22 @@
+{$EXTERNAL}
+{$USE CLEO}
+{$OPCODE 7A01=2,grandmp_bootstrap status %1d% handle %2d%}
+03A4: script_name 'GMSCM09'
+0006: 2@ = -1
+0AD1: show_formatted_text_highpriority "GrandMP CLEO: BEFORE 7A01" time 6000
+:TICK
+0001: wait 0
+7A01: 0@ 1@
+if
+003B: 0@ == 2@
+then
+else
+0AD1: show_formatted_text_highpriority "GrandMP SCM status=%d handle=%d (F6 create / F8 remove)" time 2500 0@ 1@
+0085: 2@ = 0@
+end
+if
+0039: 0@ == 4
+then
+0A93: terminate_this_custom_script
+end
+0002: jump @TICK

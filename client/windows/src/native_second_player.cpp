@@ -71,8 +71,8 @@ bool WindowsAccess::constructionProven() const noexcept {
         get(0xB7CB64,scale) && scale==0x3F800000 && groupVacant(group) && taskCapacity();
 }
 ps::MemoryRead WindowsAccess::read(std::uint32_t address,void* output,std::size_t size) noexcept {
-    if (!context() && !controlContext()) return {false,0,ERROR_ACCESS_DENIED};
-    return ps::readMemory(address,output,size);
+    if (!context() && !controlContext()) return observeRead({false,0,ERROR_ACCESS_DENIED},size);
+    return observeRead(ps::readMemory(address,output,size),size);
 }
 bool WindowsAccess::putGroup(unsigned value) noexcept {
     return writeOwn(data1+0x38,value) && [&] { unsigned observed=8;return get(data1+0x38,observed) && observed==value; }();
@@ -100,23 +100,47 @@ bool WindowsAccess::onFootDefaultOwned(const Record& record) const noexcept {
         ownGroup(ownPed_) && defaultTask(ownPed_);
 }
 bool WindowsAccess::createPlayerOne() {
-    if (!constructionProven()) return false;
+    const bool previousObservation=observingCreation_;
+    observingCreation_=creationObservation_.flags==0;
+    struct EndObservation { bool& active;bool before;~EndObservation(){active=before;} } endObservation{observingCreation_,previousObservation};
+    if(observingCreation_)creationObservation_.flags|=NativeCreateObservation::started;
+    if (!constructionProven()) return creationRefused(CreateFailure::preparation);
     attempted_=true; // Every subsequent failure is terminal, including pre-Setup.
     Protected before{};unsigned selected=8;
-    if (!protection(*this,before) || !groupVacant(selected) || !get(data1+0x38,oldGroup_) ||
-        !admission_.spawnGround(admission_.context,ground_) || !ps::finite(ground_)) return false;
+    if (!protection(*this,before)) return creationRefused(CreateFailure::protection_before);
+    if (!groupVacant(selected)) return creationRefused(CreateFailure::group_selection);
+    if (!get(data1+0x38,oldGroup_)) return creationRefused(CreateFailure::old_group_read);
+    if (!admission_.spawnGround(admission_.context,ground_)) return creationRefused(CreateFailure::spawn_refused);
+    if (!ps::finite(ground_)) return creationRefused(CreateFailure::spawn_nonfinite);
 #if defined(GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD) && GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD == 1
     // SetInitialState(false) runs BEFORE the constructor allocates a group.
     // Seed only our PlayerData field with the first authenticated empty group.
     Protected after{};
     group_=selected;
-    if (!putGroup(group_)) return false;
+    if (!putGroup(group_)) return creationRefused(CreateFailure::group_seed);
     seeded_=true;
+    if(observingCreation_)creationObservation_.flags|=NativeCreateObservation::group_seeded|NativeCreateObservation::setup_entered;
     reinterpret_cast<void(__cdecl*)(int)>(setup)(1);
-    if (!get(slot1,ownPed_) || !ownPed_) return false;
-    return ownGroup(ownPed_) && defaultTask(ownPed_) && protection(*this,after) && before==after;
+    if(observingCreation_)creationObservation_.flags|=NativeCreateObservation::setup_returned;
+    const bool slotRead=get(slot1,ownPed_);
+    if(observingCreation_)creationObservation_.slot=!slotRead ? CreateSlot::unreadable : !ownPed_ ? CreateSlot::empty : CreateSlot::present;
+    if (!slotRead) return creationRefused(CreateFailure::slot_read);
+    if (!ownPed_) return creationRefused(CreateFailure::slot_empty);
+    if (!ownGroup(ownPed_)) return creationRefused(CreateFailure::group_ownership);
+    if (!defaultTask(ownPed_)) return creationRefused(CreateFailure::default_task);
+    if (!protection(*this,after)) return creationRefused(CreateFailure::protection_after);
+    if (!(before==after)) {
+        // Compare only the two snapshots ALREADY captured, no extra GTA reads.
+        if(observingCreation_)creationObservation_.changedProtection=
+            (before.camera!=after.camera ? 1u:0u) | (before.cjGroup!=after.cjGroup ? 2u:0u) |
+            (before.cjGroupId!=after.cjGroupId ? 4u:0u) | (before.anim!=after.anim ? 8u:0u) |
+            (before.timeScale!=after.timeScale ? 16u:0u);
+        return creationRefused(CreateFailure::protected_state_changed);
+    }
+    if(observingCreation_)creationObservation_.flags|=NativeCreateObservation::complete;
+    return true;
 #else
-    return false;
+    return creationRefused(CreateFailure::execution_closed);
 #endif
 }
 bool WindowsAccess::finishPlayerOne(const Record& record) {
