@@ -144,6 +144,9 @@ public:
         if (!owner() || !api.context(Phase::pre_world)) return Result::context_refused;
         if (busy_) return Result::reentrant;
         if (terminal()) return Result::indeterminate;
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+        if (removalRequested_) return Result::blocked_contract;
+#endif
         core::RemotePlayerFrames frames;
         if (!controller.tryRead(now,frames)) { current_={};inputDisposition_=InputDisposition::neutral_contended;return Result::no_input; }
         const core::RemotePlayerFrame* selected=nullptr;
@@ -189,6 +192,21 @@ public:
         return Result::created;
     }
 
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+    // Minimal profile: one live request, no partial-construction cleanup.
+    Result requestRemoval(Api& api) {
+        if constexpr (!Enabled) return Result::closed;
+        if (!owner() || !api.context(Phase::pre_world)) return Result::context_refused;
+        if (busy_) return Result::reentrant;
+        if (removalRequested_) return Result::blocked_contract;
+        removalRequested_=true;
+        const bool live=state_==State::live;state_=State::indeterminate;
+        if (!live || !api.authenticate(record_)) return Result::blocked_contract;
+        retirementReason_="operator_removal_request";
+        return retire(api);
+    }
+
+#else
     // Explicit operator request, including a terminal but authenticated partial build.
     // No recovery, retries or cleanup of an uncorrelated factory result.
     Result requestRemoval(Api& api) {
@@ -200,6 +218,8 @@ public:
         retirementReason_="operator_removal_request";
         return retire(api);
     }
+
+#endif
 
     // Only an authenticated original CPlayerPed dispatch may enter. This is not
     // called by consume()/pre_world and installs no hook or substitute scheduler.
@@ -276,6 +296,9 @@ private:
     bool owner() const noexcept { return owner_!=std::thread::id{} && owner_==std::this_thread::get_id(); }
     bool terminal() const noexcept { return state_==State::blocked || state_==State::ownership_lost || state_==State::indeterminate || state_==State::poisoned; }
     Result retire(Api& api) {
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+        removalRequested_=true;state_=State::indeterminate;
+#endif
         current_={};
         if (!api.removalProven()) {state_=State::indeterminate;return Result::blocked_contract;}
         busy_=true;state_=State::indeterminate;
@@ -286,7 +309,11 @@ private:
         if (result!=Removal::complete || record_.key!=before.key || record_.entity!=before.entity ||
             !api.removed(before,record_)) return Result::indeterminate;
         // Only now release our record. No dereference after native destruction.
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+        previous_={};sequence_=0;state_=State::retired; // Retain logical identity; never readmit.
+#else
         record_={};previous_={};sequence_=0;state_=State::retired;
+#endif
         return Result::removed;
     }
     struct Invocation { Binding& binding;Api& api;const ContextImage& saved;ProcessObservation* observation=nullptr;bool applied=false,returned=false,restored=false; };
@@ -325,6 +352,9 @@ private:
     std::uint64_t generationFloor_=0,lastDispatch_=0;
     std::uint32_t sequence_=0;
     State state_=State::empty;
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+    bool removalRequested_=false;
+#endif
     bool busy_=false;
     const char* retirementReason_="none";
     InputDisposition inputDisposition_=InputDisposition::neutral_missing;

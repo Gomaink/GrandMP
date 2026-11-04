@@ -936,3 +936,28 @@ if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
         set_tests_properties(real_client_sync_lan_endpoint_udp PROPERTIES TIMEOUT 25)
     endif()
 endif()
+
+# Alpha 0.13: pure transaction faults and the existing Binding test backend.
+if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    add_executable(grandmp_minimal_lifecycle_tests minimal_player_lifecycle_tests.cpp)
+    target_compile_options(grandmp_minimal_lifecycle_tests PRIVATE /W4 /WX /EHsc)
+    target_include_directories(grandmp_minimal_lifecycle_tests PRIVATE ${PROJECT_SOURCE_DIR}/client/windows/include)
+    target_link_libraries(grandmp_minimal_lifecycle_tests PRIVATE GrandMP::Shared)
+    foreach(minimal_case success edge barrier fail0 fail1 fail2 fail3 fail4 fail5 throw1 throw2 throw3 throw4
+            armed_before_live armed_early armed_hold armed_complete armed_after_window armed_missing armed_inconclusive
+            armed_readiness armed_residual armed_partial armed_late armed_generation armed_clock)
+        add_test(NAME minimal_lifecycle_${minimal_case} COMMAND grandmp_minimal_lifecycle_tests ${minimal_case})
+    endforeach()
+    add_executable(grandmp_minimal_binding_tests remote_player_binding_tests.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_hoodlum.cpp)
+    target_compile_options(grandmp_minimal_binding_tests PRIVATE /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_minimal_binding_tests PRIVATE GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD=1)
+    target_link_libraries(grandmp_minimal_binding_tests PRIVATE GrandMP::Shared grandmp_windows_detection bcrypt)
+    foreach(minimal_case remove restore identity admission partial postcondition reentry)
+        add_test(NAME minimal_binding_${minimal_case} COMMAND grandmp_minimal_binding_tests minimal_${minimal_case})
+    endforeach()
+    foreach(armed_case pending complete)
+        add_test(NAME minimal_binding_armed_${armed_case} COMMAND grandmp_minimal_binding_tests armed_${armed_case})
+    endforeach()
+endif()

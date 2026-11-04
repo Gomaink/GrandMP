@@ -277,6 +277,9 @@ bool Api::authenticate(const Record& record) noexcept {
         get(ped_+layout::movingLink,node) && node && get(node,entity) && entity==ped_ && reference(true) && ownGroup() &&
         get(layout::slot1,second) && second==secondBefore_;
 }
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+#include "../tools/minimal_player_lifecycle.inl"
+#else
 bool Api::removalProven() const noexcept {return context(Phase::pre_world) && ready() && live_ && !destroyed_;}
 Removal Api::remove(Record& record) {
     if(!removalProven() || !authenticate(record))return Removal::indeterminate;
@@ -310,6 +313,7 @@ bool Api::removed(const Record& before,const Record& after) noexcept {
         get(f::groupFlags+group_,groupActive) && !groupActive && get(dataAddress(),wanted) && !wanted &&
         get(dataAddress()+4,clothes) && !clothes;
 }
+#endif
 
 struct InputImage {
     std::array<std::byte,padStride> local{};

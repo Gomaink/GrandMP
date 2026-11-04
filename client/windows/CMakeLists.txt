@@ -21,6 +21,11 @@ endif()
 if(GRANDMP_ENABLE_AUTHENTICATED_PAD_COW AND NOT GRANDMP_BUILD_INDEPENDENT_NATIVE_CONTROL_PROOF)
     message(FATAL_ERROR "Authenticated pad COW requires the isolated independent proof")
 endif()
+option(GRANDMP_ENABLE_MINIMAL_NATIVE_LIFECYCLE "Expose Alpha 0.13 minimal removal in the isolated Alpha 0.11.2 proof" OFF)
+if(GRANDMP_ENABLE_MINIMAL_NATIVE_LIFECYCLE AND NOT (GRANDMP_BUILD_INDEPENDENT_NATIVE_CONTROL_PROOF AND
+    GRANDMP_ENABLE_AUTHENTICATED_PAD_COW AND GRANDMP_ENABLE_REMOTE_TAIL_DIAGNOSTIC AND GRANDMP_ENABLE_SEMANTIC_PAD_CONTEXT))
+    message(FATAL_ERROR "Minimal lifecycle requires the complete validated Alpha 0.11.2 proof profile")
+endif()
 set(GRANDMP_CLEO4_SDK_DIR "" CACHE PATH "Exact CLEO4 4.4.4 cleo_sdk directory")
 set(GRANDMP_SANNY_COMPILER "" CACHE FILEPATH "Sanny Builder compiler, used offline only")
 if((GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP AND GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION) OR
@@ -79,6 +84,12 @@ if(GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP OR GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION
             set_target_properties(grandmp_independent_native_control_proof PROPERTIES
                 RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof-semantic-pad"
                 LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-native-control-proof-semantic-pad")
+        endif()
+        if(GRANDMP_ENABLE_MINIMAL_NATIVE_LIFECYCLE)
+            target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD=1)
+            set_target_properties(grandmp_independent_native_control_proof PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/minimal-native-lifecycle"
+                LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/minimal-native-lifecycle")
         endif()
     elseif(GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION)
         add_library(grandmp_remote_player_foundation MODULE EXCLUDE_FROM_ALL cleo/player_bootstrap.cpp

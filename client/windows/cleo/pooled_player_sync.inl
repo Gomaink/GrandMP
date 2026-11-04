@@ -1,3 +1,7 @@
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+np::minimal_lifecycle::DispatchBarrier removalBarrier;
+np::minimal_lifecycle::ArmedRemoval removalRequest;
+#endif
 // Alpha 0.10 only. Existing CLEO scheduler, capture, Controller and transport;
 // no shared HookCell publication and no cooperative PlayerInfo entity.
 nf::FirstProcessingFailure processingFailure;
@@ -68,6 +72,9 @@ void pooledFinish(void* value) noexcept {
     auto& call=*static_cast<PooledInvocation*>(value);
     call.observation.native=bootstrapApi->endProcessingObservation(); // Copy only; no engine access.
 #if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+    bootstrapApi->completedForRemoval(call.observation.returned && call.observation.result==np::Result::processed,proofNeutral());
+#endif
     proofAfter(call.observation);
 #endif
     inputActive=false;inputPed=0;
@@ -78,6 +85,9 @@ void pooledFinish(void* value) noexcept {
     }
 }
 __declspec(noinline) void __fastcall pooledControl(void* ped,void*) {
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+    if(removalBarrier.closed())return; // Resident tombstone: no PED read, log or native call.
+#endif
     // Only the newly owned object's table routes here. Local CJ's vtable, pad0,
     // focus and original ProcessControl are never hooked or replaced.
     const auto caller=static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(_ReturnAddress()));

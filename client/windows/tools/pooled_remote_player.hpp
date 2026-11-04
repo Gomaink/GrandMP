@@ -3,6 +3,12 @@
 #include "native_player_replay.hpp"
 #include <atomic>
 #include <type_traits>
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+#include "grandmp/windows/minimal_player_lifecycle.hpp"
+#if !defined(GRANDMP_SEMANTIC_PAD_CONTEXT_BUILD) || GRANDMP_SEMANTIC_PAD_CONTEXT_BUILD != 1
+#error Minimal lifecycle requires the validated Alpha 0.11.2 semantic pad profile
+#endif
+#endif
 #if defined(GRANDMP_REMOTE_TAIL_DIAGNOSTIC_BUILD) && GRANDMP_REMOTE_TAIL_DIAGNOSTIC_BUILD == 1
 #include "remote_tail_diagnostic.hpp"
 #if !defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) || GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD != 1
@@ -215,10 +221,25 @@ private:
 
 class Api final : public remote_player_binding::Api {
 public:
-    explicit Api(Admission admission,std::thread::id owner,std::uint32_t control) noexcept
-        : admission_(admission),owner_(owner),control_(control) {}
+    explicit Api(Admission admission,std::thread::id owner,std::uint32_t control
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+        ,bool (*cleanupReady)(void*) noexcept=nullptr,minimal_lifecycle::DispatchBarrier* removalBarrier=nullptr
+#endif
+        ) noexcept
+        : admission_(admission),owner_(owner),control_(control)
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+        ,cleanupReady_(cleanupReady),removalBarrier_(removalBarrier)
+#endif
+        {}
     Api(const Api&)=delete;
     Api& operator=(const Api&)=delete;
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+    // Called after Binding::process returns, outside its unchanged native path.
+    void completedForRemoval(bool processed,bool neutral) noexcept {
+        completedNeutral_=processed && neutral && originalReturned_ && !observing_ && !restoring_;
+    }
+    const minimal_lifecycle::Tombstone& tombstone() const noexcept {return removal_;}
+#endif
     Reason reason() const noexcept {return reason_;}
     const char* failure() const noexcept {return failure_;}
     void beginProcessingObservation() noexcept {processing_={};observing_=true;restoring_=false;}
@@ -282,6 +303,16 @@ private:
         return result.complete(sizeof(value)) || processingRefused(guard,static_cast<std::uint32_t>(result.transferred),sizeof(value),result.error);
     }
     bool ready() const noexcept;
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+    bool cleanupContext() const noexcept;
+    bool retainedForRemoval(const Record&) const noexcept;
+    bool releasedForRemoval(const Record&,bool) const noexcept;
+    bool stoppedForRemoval() const noexcept;
+    bool (*cleanupReady_)(void*) noexcept=nullptr;
+    minimal_lifecycle::DispatchBarrier* removalBarrier_=nullptr; // Resident module data, never an engine pointer.
+    minimal_lifecycle::Tombstone removal_{};
+    bool completedNeutral_=false;
+#endif
     bool refused(Reason reason,const char* point) const noexcept {reason_=reason;failure_=point;return false;}
     template<class T> bool get(std::uint32_t at,T& value) const noexcept {
         return ps::readMemory(at,&value,sizeof(value)).complete(sizeof(value));

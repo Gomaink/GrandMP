@@ -2,6 +2,9 @@
 #define NOMINMAX
 #include <windows.h>
 #include "grandmp/windows/remote_player_binding.hpp"
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+#include "grandmp/windows/minimal_player_lifecycle.hpp"
+#endif
 #include "grandmp/windows/remote_player_hoodlum.hpp"
 #include "../client/windows/cleo/independent_control_proof.hpp"
 #include "../client/windows/tools/semantic_pad_context.hpp"
@@ -63,7 +66,13 @@ struct TestApi final : rb::Api {
         return ownership && record.key==authenticated.key && record.entity==authenticated.entity &&
             record.reference==record.entity.ped && &record.reference==referenceCell;
     }
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+    bool removalReentry=false;
+#endif
     rb::Removal remove(rb::Record& record) override {
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+        if(removalReentry)check(binding->requestRemoval(*this)==rb::Result::reentrant,"removal reentrancy blocked");
+#endif
         ++removes;record.reference=0;return removalResult;
     }
     bool removed(const rb::Record& before,const rb::Record& after) noexcept override {
@@ -151,6 +160,50 @@ void run(std::string_view which,const char* executable) {
         check(!rb::inspectHoodlumPlayerContract(std::as_bytes(std::span(bytes))).exactExecutable,"one changed byte refuses identity");return;
     }
     Fixture f;
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+    if(which=="armed_pending" || which=="armed_complete"){
+        namespace m=rb::minimal_lifecycle;
+        f.admit();const auto key=f.binding->key();m::ArmedRemoval request;
+        check(request.poll(true,true,key,m::Window::waiting,0)==m::Opportunity::wait,"arm during walk");
+        for(unsigned i=1;i<=3;++i){
+            f.sample(i+1,0,1,start+std::chrono::milliseconds(i));
+            check(f.process(i,start+std::chrono::milliseconds(i))==rb::Result::processed,"original Binding continues while F8 pending");
+            check(request.poll(true,true,key,m::Window::waiting,i)==m::Opportunity::wait,"held F8 still pending");
+        }
+        check(f.api.originals==3 && f.api.applies==3 && f.api.restores==3 && !f.api.removes,"no suppressed original and no early cleanup");
+        f.sample(5,0,0,start+4ms);
+        check(f.process(4,start+4ms)==rb::Result::processed && f.api.controls.current==core::PlayerControls{},"neutral original completed/restored");
+        check(request.poll(false,true,key,m::Window::complete,6000)==m::Opportunity::attempt,"one scheduled removal");
+        if(which=="armed_complete"){
+            check(f.binding->requestRemoval(f.api)==rb::Result::removed && f.api.removes==1,"actual Binding consumes native removal once");
+            check(f.process(5,start+5ms)==rb::Result::indeterminate && f.api.originals==4,"late callback cannot call original after removal");
+        }
+        check(request.poll(true,true,key,m::Window::complete,6001)==m::Opportunity::wait,"no second dispatch");return;
+    }
+    if(which.starts_with("minimal_")){
+        f.admit();const auto key=f.binding->key();const auto ped=f.binding->entityAddress();
+        if(which=="minimal_restore"){
+            f.api.restoreOkay=false;check(f.process(1)==rb::Result::restore_failed,"restoration failure remains terminal");
+        }else check(f.process(1)==rb::Result::processed,"baseline process returned and restored");
+        if(which=="minimal_identity")f.api.ownership=false;
+        if(which=="minimal_admission")f.api.removal=false;
+        if(which=="minimal_partial")f.api.removalResult=rb::Removal::indeterminate;
+        if(which=="minimal_postcondition")f.api.postcondition=false;
+        if(which=="minimal_reentry")f.api.removalReentry=true;
+        const auto result=f.binding->requestRemoval(f.api);
+        const bool success=which=="minimal_remove" || which=="minimal_reentry";
+        check((result==rb::Result::removed)==success,"only proven completion is removed");
+        const auto calls=f.api.removes,originals=f.api.originals,probes=f.api.probes;
+        check(f.binding->requestRemoval(f.api)==rb::Result::blocked_contract,"no second removal request");
+        check(f.process(2)==rb::Result::indeterminate,"late callback cannot process old entity");
+        check(f.consume()==(success ? rb::Result::blocked_contract : rb::Result::indeterminate),"no readmission");
+        check(f.api.removes==calls && f.api.originals==originals && f.api.probes==probes,"no engine identity/dtor retry on late requests");
+        check(f.binding->key()==key && f.binding->entityAddress()==ped,"resident tombstone identity retained");
+        if(which=="minimal_restore" || which=="minimal_identity" || which=="minimal_admission")check(!calls,"refusal before irreversible operation");
+        return;
+    }
+#endif
+
     if(which=="proof_source" || which=="proof_timeout"){
         namespace proof=windows::independent_control_proof;
         static_assert(!proof::enabled); // Only the isolated physical target opens it.

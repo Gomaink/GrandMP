@@ -2,6 +2,9 @@
 // second task, shared HookCell or PlayerInfo publication is reachable here.
 namespace proof=grandmp::windows::independent_control_proof;
 proof::Source proofSource;
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+bool proofNeutral() noexcept {return proofSource.phase()==proof::Phase::stopped;}
+#endif
 struct ProofBatch {
     static constexpr unsigned capacity=16;
     std::array<proof::Sample,capacity> samples{};
@@ -16,6 +19,16 @@ struct ProofBatch {
     proof::DispatchHistory history{};
 #endif
 } proofBatch; // Resident through process exit; timeout NEVER disposes producer data.
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+np::minimal_lifecycle::Window proofRemovalWindow() noexcept {
+    using Window=np::minimal_lifecycle::Window;
+    if(proofBatch.stopRequested.load(std::memory_order_acquire))return Window::failed;
+    if(!proofBatch.sealed.load(std::memory_order_acquire))return Window::waiting;
+    // Producer-owned sealed values, not the log worker's conclusion or a slot lease.
+    return proofBatch.complete && proofBatch.count && proofBatch.phaseMask==7 && !proofBatch.pending &&
+        proofBatch.history.count && proofBatch.history.consecutive ? Window::complete : Window::failed;
+}
+#endif
 void proofSeal(const char* outcome,bool complete=false) noexcept {
     if(proofBatch.sealed.load(std::memory_order_relaxed))return;
     proofBatch.outcome=outcome;proofBatch.complete=complete;

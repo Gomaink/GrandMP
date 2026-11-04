@@ -247,6 +247,40 @@ bool ready(void*) noexcept {
     if(!read(ps::streamingTable+0x10,loaded))return refuse(diag::Note::model,"ready.model.read",lastReadError);
     return loaded==1 || refuse(diag::Note::model,"ready.model.value",0,loaded,1);
 }
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+// Post-boundary checks omit only transient loadingBigModel; never used by replay.
+bool cleanupReady(void*) noexcept {
+    if(!context(nullptr)
+#if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
+       && !inputContext(nullptr)
+#endif
+       )return refuse(diag::Note::contract,"ready.context");
+    if(!factoryCodeMatches())return false;
+#if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
+    if(!inputCodeMatches() || !game.matches(ps::imageBase,game.headers))return false;
+#endif
+    constexpr std::array regions{ps::CodeRegion{0x5424C0,0x93},ps::CodeRegion{0x542860,0x53},
+        ps::CodeRegion{0x571840,0x3A},ps::CodeRegion{0x5E4760,0x31},ps::CodeRegion{0x535E90,0x62},
+        ps::CodeRegion{0x542450,0x6F},ps::CodeRegion{0x40136C,0x18},ps::CodeRegion{0x406F55,0x18}};
+    for(const auto region:regions)if(!game.matches(region.address,region.size))return false;
+    BYTE focus=1,pause=1,userPause=1,disabled=1,scene=1,loaded=0;int streaming=0;
+    if(!read(ps::playerIndex,focus))return refuse(diag::Note::focus,"ready.focus.read",lastReadError);
+    if(focus)return refuse(diag::Note::focus,"ready.focus.value",0,focus,0);
+    if(!read(ps::codePause,pause))return refuse(diag::Note::code_pause,"ready.code_pause.read",lastReadError);
+    if(pause)return refuse(diag::Note::code_pause,"ready.code_pause.value",0,pause,0);
+    if(!read(ps::userPause,userPause))return refuse(diag::Note::user_pause,"ready.user_pause.read",lastReadError);
+    if(userPause)return refuse(diag::Note::user_pause,"ready.user_pause.value",0,userPause,0);
+    if(!read(ps::streamingInitialized,streaming))return refuse(diag::Note::streaming,"ready.streaming.read",lastReadError);
+    if(streaming!=1)return refuse(diag::Note::streaming,"ready.streaming.value",0,streaming,1);
+    if(!read(ps::streamingDisabled,disabled))return refuse(diag::Note::disabled,"ready.disabled.read",lastReadError);
+    if(disabled)return refuse(diag::Note::disabled,"ready.disabled.value",0,disabled,0);
+    if(!read(ps::loadingScene,scene))return refuse(diag::Note::scene,"ready.scene.read",lastReadError);
+    if(scene)return refuse(diag::Note::scene,"ready.scene.value",0,scene,0);
+    if(!read(ps::streamingTable+0x10,loaded))return refuse(diag::Note::model,"ready.model.read",lastReadError);
+    return loaded==1 || refuse(diag::Note::model,"ready.model.value",0,loaded,1);
+}
+#endif
+
 struct Probe {
     void* cj=nullptr;float floor=0;
     template<class... T> void trace(const char*,T...) noexcept {}
@@ -285,6 +319,9 @@ std::optional<nf::Api> bootstrapApi;
 #if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
 #if defined(GRANDMP_POOLED_REMOTE_PLAYER_BUILD) && GRANDMP_POOLED_REMOTE_PLAYER_BUILD == 1
 #if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+bool proofNeutral() noexcept;
+#endif
 void proofBefore(std::uint64_t) noexcept;
 void proofAfter(const nf::ProcessingFailure&) noexcept;
 #endif
@@ -419,7 +456,11 @@ bool initialise() {
     if(!binding)return refuse(diag::Note::initialise,"initialise.Binding_prepare");
     exceptionPoint="initialise.Api";
 #if defined(GRANDMP_POOLED_REMOTE_PLAYER_BUILD) && GRANDMP_POOLED_REMOTE_PLAYER_BUILD == 1
-    bootstrapApi.emplace(nf::Admission{nullptr,context,ready,spawn,inputContext},std::this_thread::get_id(),inputHookAddress());
+    bootstrapApi.emplace(nf::Admission{nullptr,context,ready,spawn,inputContext},std::this_thread::get_id(),inputHookAddress()
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+        ,cleanupReady,&removalBarrier
+#endif
+        );
 #if defined(GRANDMP_AUTHENTICATED_PAD_COW_BUILD) && GRANDMP_AUTHENTICATED_PAD_COW_BUILD == 1
     if(!bootstrapApi->admitPadImage(game.raw))return refuse(diag::Note::initialise,"initialise.pad_image_contract");
 #endif
@@ -531,10 +572,25 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
 #if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
                     if(gameplayReady)preparation.store(3);
 #endif
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+                    const auto opportunity=removalRequest.poll((GetAsyncKeyState(VK_F8)&0x8000)!=0,
+                        armed && !ended && binding->state()==np::State::live,binding->key(),proofRemovalWindow(),GetTickCount64());
+                    bool removalRequested=opportunity==np::minimal_lifecycle::Opportunity::attempt;
+                    if(opportunity==np::minimal_lifecycle::Opportunity::refused ||
+                       (removalRequested && (!gameplayReady || inputActive || !proofNeutral()))){
+                        removalRequest.cancel();removalRequested=false;
+                        diagnostic.emit(diag::Note::contract,"tick.removal_schedule_terminal");
+                        // The request is terminal. Do not suspend a still-admitted native control path.
+                    }
+#endif
                     if(gameplayReady){
                         const bool press6=(GetAsyncKeyState(VK_F6)&0x8000)!=0,press8=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
                         if(press6 && !f6 && !armed && !ended){armed=true;status.store(2);diagnostic.emit(diag::Note::armed,"tick.F6_armed");}
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+                        const bool remove=removalRequested;f6=press6;f8=press8;
+#else
                         const bool remove=press8 && !f8;f6=press6;f8=press8;
+#endif
 #if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
 #if !defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) || GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD != 1
                         captureLocalPlayer(armed && !ended); // Before any remote pad1 scope.
@@ -550,7 +606,11 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
                                 CLEO_SetIntOpcodeParam(script,status.load());CLEO_SetIntOpcodeParam(script,UINT32_MAX);return OR_CONTINUE;
                             }
 #endif
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+                            const bool foundationSnapshot=remove || stageRemote();
+#else
                             const bool foundationSnapshot=stageRemote();
+#endif
 #endif
                             exceptionPoint=remove ? "tick.requestRemoval" : "tick.consume";
 #if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
@@ -615,6 +675,9 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
 #endif
                             }
                             if(r==np::Result::ownership_lost || r==np::Result::indeterminate || r==np::Result::blocked_contract){
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+                                stopped.store(true); // No later callback/readmission after a removal refusal.
+#endif
                                 status.store(200+static_cast<unsigned>(bootstrapApi->reason()));ended=true;
                                 diagnostic.emit(diag::Note::contract,exceptionPoint,0,static_cast<unsigned>(r),0,static_cast<unsigned>(bootstrapApi->reason()));}
                             else if(r!=np::Result::no_input && r!=np::Result::created && r!=np::Result::updated && r!=np::Result::removed)
@@ -630,6 +693,9 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
             }
         }
     }catch(...){borrowed=false;stopped.store(true);status.store(104);diagnostic.emit(diag::Note::exception,exceptionPoint);}
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+    if(scriptThread==GetCurrentThreadId() && stopped.load())removalRequest.cancel();
+#endif
     CLEO_SetIntOpcodeParam(script,status.load());
     // Return a pool handle, never a raw PED pointer. Only after live correlation.
     const DWORD handle=scriptThread==GetCurrentThreadId() && binding && binding->state()==np::State::live && status.load()==3 ?
