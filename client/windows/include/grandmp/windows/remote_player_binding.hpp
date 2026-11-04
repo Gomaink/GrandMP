@@ -192,7 +192,13 @@ public:
         return Result::created;
     }
 
-#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+    // Input-only milestone: even an explicit request cannot consult cleanup providers.
+    Result requestRemoval(Api&) {
+        if constexpr (!Enabled) return Result::closed;
+        return owner() ? Result::blocked_contract : Result::context_refused;
+    }
+#elif defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
     // Minimal profile: one live request, no partial-construction cleanup.
     Result requestRemoval(Api& api) {
         if constexpr (!Enabled) return Result::closed;
@@ -296,6 +302,10 @@ private:
     bool owner() const noexcept { return owner_!=std::thread::id{} && owner_==std::this_thread::get_id(); }
     bool terminal() const noexcept { return state_==State::blocked || state_==State::ownership_lost || state_==State::indeterminate || state_==State::poisoned; }
     Result retire(Api& api) {
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+        (void)api;current_={};inputDisposition_=InputDisposition::neutral_missing;
+        return Result::no_input; // Keep the authenticated world object processing neutral; no destruction/replacement.
+#else
 #if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
         removalRequested_=true;state_=State::indeterminate;
 #endif
@@ -315,6 +325,7 @@ private:
         record_={};previous_={};sequence_=0;state_=State::retired;
 #endif
         return Result::removed;
+#endif
     }
     struct Invocation { Binding& binding;Api& api;const ContextImage& saved;ProcessObservation* observation=nullptr;bool applied=false,returned=false,restored=false; };
     static void body(void* value) {

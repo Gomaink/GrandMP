@@ -1,6 +1,8 @@
 #if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
 np::minimal_lifecycle::DispatchBarrier removalBarrier;
+#if !defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1
 np::minimal_lifecycle::ArmedRemoval removalRequest;
+#endif
 #endif
 // Alpha 0.10 only. Existing CLEO scheduler, capture, Controller and transport;
 // no shared HookCell publication and no cooperative PlayerInfo entity.
@@ -22,8 +24,20 @@ bool stageRemote() noexcept {
     for(std::size_t i=0;i<frames.count && i<frames.players.size();++i){
         const auto& frame=frames.players[i];
         if((binding->state()==np::State::live ? frame.key==binding->key() : frame.freshness==grandmp::core::ControlFreshness::fresh)){
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+            if(binding->state()==np::State::live)return true;
+            // Reuse Alpha 0.13.1's initial local spawn probe, not UDP XYZ as a placement command.
+            Probe probe;ps::Position at{};
+            if(!ps::findSpawnPosition(probe,at)){
+                stopped.store(true);status.store(108);
+                diagnostic.emit(diag::Note::proof_source,"udp.spawn_reference_refused_terminal_no_retry");return false;
+            }
+            auto initial=frame;initial.presentation.x=at.x;initial.presentation.y=at.y;initial.presentation.z=at.z;
+            return bootstrapApi->stage(initial); // Controller's wire snapshot and controls remain untouched.
+#else
             const bool staged=bootstrapApi->stage(frame);
             return binding->state()==np::State::live || staged;
+#endif
         }
     }
     return binding->state()==np::State::live; // A coherent leave must still reach consume.
@@ -71,7 +85,7 @@ void pooledInvoke(void* value) {
 void pooledFinish(void* value) noexcept {
     auto& call=*static_cast<PooledInvocation*>(value);
     call.observation.native=bootstrapApi->endProcessingObservation(); // Copy only; no engine access.
-#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1 && (!defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1)
 #if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
     bootstrapApi->completedForRemoval(call.observation.returned && call.observation.result==np::Result::processed,proofNeutral());
 #endif
@@ -110,7 +124,7 @@ __declspec(noinline) void __fastcall pooledControl(void* ped,void*) {
     inputActive=true;inputPed=static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(ped));++inputSerial;
     PooledInvocation call{};call.observation.key=binding->key();call.observation.serial=inputSerial;
     bootstrapApi->beginProcessingObservation();
-#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1 && (!defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1)
     proofBefore(inputSerial);
 #endif
     np::withFinally(pooledInvoke,pooledFinish,&call);

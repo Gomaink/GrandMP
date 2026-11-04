@@ -10,7 +10,7 @@
 #if defined(GRANDMP_POOLED_REMOTE_PLAYER_BUILD) && GRANDMP_POOLED_REMOTE_PLAYER_BUILD == 1
 #include "../tools/pooled_remote_player.hpp"
 #include "processing_diagnostics.hpp"
-#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1 && (!defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1)
 #include "control_proof_diagnostics.hpp"
 #endif
 #endif
@@ -318,7 +318,7 @@ std::optional<nf::Api> bootstrapApi;
 #endif
 #if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
 #if defined(GRANDMP_POOLED_REMOTE_PLAYER_BUILD) && GRANDMP_POOLED_REMOTE_PLAYER_BUILD == 1
-#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1 && (!defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1)
 #if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
 bool proofNeutral() noexcept;
 #endif
@@ -326,7 +326,7 @@ void proofBefore(std::uint64_t) noexcept;
 void proofAfter(const nf::ProcessingFailure&) noexcept;
 #endif
 #include "pooled_player_sync.inl"
-#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1 && (!defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1)
 #include "independent_control_proof.inl"
 #endif
 #else
@@ -335,7 +335,7 @@ void proofAfter(const nf::ProcessingFailure&) noexcept;
 #endif
 void deleted(CScriptThread* script){if(scriptOwner.load()==reinterpret_cast<std::uintptr_t>(script)){
     stopped.store(true);status.store(105);diagnostic.emit(diag::Note::deleted,"deleted.owned_script");}}
-#if !defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) || GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD != 1
+#if !defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) || GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD != 1 || (defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1)
 DWORD WINAPI network(void*) {
 #if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
     struct SessionFence { ~SessionFence(){localSnapshots.session(0);localSnapshots.invalidate();} } fence;
@@ -365,7 +365,11 @@ DWORD WINAPI network(void*) {
 #if defined(GRANDMP_POOLED_REMOTE_PLAYER_BUILD) && GRANDMP_POOLED_REMOTE_PLAYER_BUILD == 1
         reportProcessingFailure(); // Copied values on existing worker, never GTA reads.
 #endif
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+        net.tick(std::nullopt); // Existing receiver/Controller; no native capture or deterministic source.
+#else
         if(!net.tickLocal(localSnapshots)){stopped.store(true);status.store(106);diagnostic.emit(diag::Note::sync_failure,"network.tickLocal");break;}
+#endif
         if(!receiverLogged && net.sessionId()){
             receiverLogged=true;diagnostic.emit(diag::Note::receiver_session,"network.receiver_session",0,net.sessionId());
         }
@@ -469,7 +473,7 @@ bool initialise() {
 #endif
     CLEO_AddScriptDeleteDelegate(deleted);
     HANDLE thread=CreateThread(nullptr,0,
-#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1 && (!defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1)
         proofWorker,
 #else
         network,
@@ -572,7 +576,7 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
 #if defined(GRANDMP_CLEO_PLAYER_SYNC_BUILD) && GRANDMP_CLEO_PLAYER_SYNC_BUILD == 1
                     if(gameplayReady)preparation.store(3);
 #endif
-#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1 && (!defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1)
                     const auto opportunity=removalRequest.poll((GetAsyncKeyState(VK_F8)&0x8000)!=0,
                         armed && !ended && binding->state()==np::State::live,binding->key(),proofRemovalWindow(),GetTickCount64());
                     bool removalRequested=opportunity==np::minimal_lifecycle::Opportunity::attempt;
@@ -586,7 +590,9 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
                     if(gameplayReady){
                         const bool press6=(GetAsyncKeyState(VK_F6)&0x8000)!=0,press8=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
                         if(press6 && !f6 && !armed && !ended){armed=true;status.store(2);diagnostic.emit(diag::Note::armed,"tick.F6_armed");}
-#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+                        constexpr bool remove=false;f6=press6;f8=press8; // F8 cannot borrow deterministic removal admission.
+#elif defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
                         const bool remove=removalRequested;f6=press6;f8=press8;
 #else
                         const bool remove=press8 && !f8;f6=press6;f8=press8;
@@ -598,7 +604,7 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
 #endif
                         if(armed && (!ended || remove)){
 #if defined(GRANDMP_POOLED_REMOTE_PLAYER_BUILD) && GRANDMP_POOLED_REMOTE_PLAYER_BUILD == 1
-#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) && GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD == 1 && (!defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1)
                             if(remove)proofSeal("operator_removal");
                             else if(!proofPublish()){
                                 stopped.store(true);status.store(108);
@@ -693,7 +699,7 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
             }
         }
     }catch(...){borrowed=false;stopped.store(true);status.store(104);diagnostic.emit(diag::Note::exception,exceptionPoint);}
-#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
+#if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1 && (!defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) || GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD != 1)
     if(scriptThread==GetCurrentThreadId() && stopped.load())removalRequest.cancel();
 #endif
     CLEO_SetIntOpcodeParam(script,status.load());

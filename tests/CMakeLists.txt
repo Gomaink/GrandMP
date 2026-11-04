@@ -961,3 +961,24 @@ if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
         add_test(NAME minimal_binding_armed_${armed_case} COMMAND grandmp_minimal_binding_tests armed_${armed_case})
     endforeach()
 endif()
+
+# Alpha 0.14 receive-only integration, using the existing Binding test backend.
+if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    add_executable(grandmp_independent_udp_tests remote_player_binding_tests.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_binding.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/remote_player_hoodlum.cpp
+        ${PROJECT_SOURCE_DIR}/client/windows/src/observer_network.cpp)
+    target_compile_options(grandmp_independent_udp_tests PRIVATE /W4 /WX /EHsc)
+    target_compile_definitions(grandmp_independent_udp_tests PRIVATE GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD=1 GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD=1)
+    target_link_libraries(grandmp_independent_udp_tests PRIVATE GrandMP::Shared grandmp_windows_detection bcrypt ws2_32)
+    add_test(NAME independent_udp_closed_binding COMMAND grandmp_independent_udp_tests gate)
+    foreach(udp_case no_fresh timeout identity stale f8 leave generation)
+        add_test(NAME independent_udp_${udp_case} COMMAND grandmp_independent_udp_tests udp_${udp_case})
+    endforeach()
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME independent_udp_relay_binding COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/independent_udp_loopback.py $<TARGET_FILE:grandmp_server>
+            $<TARGET_FILE:grandmp_synthetic_client> $<TARGET_FILE:grandmp_independent_udp_tests>)
+        set_tests_properties(independent_udp_relay_binding PROPERTIES TIMEOUT 30)
+    endif()
+endif()

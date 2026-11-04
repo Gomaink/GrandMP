@@ -26,6 +26,10 @@ if(GRANDMP_ENABLE_MINIMAL_NATIVE_LIFECYCLE AND NOT (GRANDMP_BUILD_INDEPENDENT_NA
     GRANDMP_ENABLE_AUTHENTICATED_PAD_COW AND GRANDMP_ENABLE_REMOTE_TAIL_DIAGNOSTIC AND GRANDMP_ENABLE_SEMANTIC_PAD_CONTEXT))
     message(FATAL_ERROR "Minimal lifecycle requires the complete validated Alpha 0.11.2 proof profile")
 endif()
+option(GRANDMP_ENABLE_INDEPENDENT_PLAYER_UDP "Receive UDP input in the isolated independent CPlayerPed profile; no presentation/removal" OFF)
+if(GRANDMP_ENABLE_INDEPENDENT_PLAYER_UDP AND NOT GRANDMP_ENABLE_MINIMAL_NATIVE_LIFECYCLE)
+    message(FATAL_ERROR "Independent UDP requires the complete validated Alpha 0.13.1 profile")
+endif()
 set(GRANDMP_CLEO4_SDK_DIR "" CACHE PATH "Exact CLEO4 4.4.4 cleo_sdk directory")
 set(GRANDMP_SANNY_COMPILER "" CACHE FILEPATH "Sanny Builder compiler, used offline only")
 if((GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP AND GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION) OR
@@ -90,6 +94,14 @@ if(GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP OR GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION
             set_target_properties(grandmp_independent_native_control_proof PROPERTIES
                 RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/minimal-native-lifecycle"
                 LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/minimal-native-lifecycle")
+        endif()
+        if(GRANDMP_ENABLE_INDEPENDENT_PLAYER_UDP)
+            target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD=1)
+            target_sources(grandmp_independent_native_control_proof PRIVATE src/observer_network.cpp)
+            target_link_libraries(grandmp_independent_native_control_proof PRIVATE ws2_32)
+            set_target_properties(grandmp_independent_native_control_proof PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-player-udp"
+                LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-player-udp")
         endif()
     elseif(GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION)
         add_library(grandmp_remote_player_foundation MODULE EXCLUDE_FROM_ALL cleo/player_bootstrap.cpp

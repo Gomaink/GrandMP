@@ -1,5 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+#include <winsock2.h>
+#include "grandmp/windows/observer_network.hpp"
+#include <atomic>
+#endif
 #include <windows.h>
 #include "grandmp/windows/remote_player_binding.hpp"
 #if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
@@ -51,7 +56,14 @@ struct TestApi final : rb::Api {
     core::RemotePlayerController* controller=nullptr;
     rb::Dispatch activeDispatch{};
     TestApi() { contextBytes.fill(std::byte{0x65}); }
-    bool context(rb::Phase) const noexcept override { return authorized; }
+    bool context(rb::Phase) const noexcept override { return authorized
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+        && nativeOwner==std::this_thread::get_id()
+#endif
+        ; }
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+    const std::thread::id nativeOwner=std::this_thread::get_id();
+#endif
     bool factoryProven() const noexcept override { return factory; }
     bool removalProven() const noexcept override { return removal; }
     bool replayProven() const noexcept override { return replay; }
@@ -59,6 +71,9 @@ struct TestApi final : rb::Api {
         ++creates;check(record.key==key,"immutable admission key");
         referenceCell=&record.reference;
         if (creation!=rb::Creation::absent) record.entity={101,202,303,17,1},record.reference=101;
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+        if(record.entity.ped)record.entity.slot=std::numeric_limits<unsigned>::max();
+#endif
         authenticated=record;return creation;
     }
     bool authenticate(const rb::Record& record) noexcept override {
@@ -138,6 +153,57 @@ bool sehCall(Fixture* fixture,rb::ProcessObservation* observation=nullptr) {
     __try { (void)fixture->process(1,start,observation);return false; }
     __except(GetExceptionCode()==0xE0421234 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { return true; }
 }
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+void udpPipeline(Fixture& f,unsigned short port,bool absent) {
+    std::atomic<bool> connected=false,failed=false;
+    // Transport/Controller producer only. The existing backend is never passed to this thread.
+    std::jthread producer([&](std::stop_token stop){
+        windows::ObserverNetwork net;net.setRemotePlayerController(&f.controller);
+        if(!net.start(port) || !net.beginRemoteScenePreview()){failed=true;return;}
+        while(!stop.stop_requested()){
+            net.tick(std::nullopt);connected.store(net.connected());Sleep(5);
+        }
+        net.stop();
+    });
+    if(absent){
+        for(unsigned i=0;i<30;++i){check(f.consume(core::RemoteRoster::Clock::now())==rb::Result::no_input,"no server cannot create");Sleep(5);}
+        check(!connected && !failed && !f.api.creates && !f.api.probes && !f.api.originals,"absence never probes engine");return;
+    }
+    const auto deadline=GetTickCount64()+18000;bool announced=false,walk=false,turn=false,neutral=false,expired=false;
+    std::uint64_t serial=0;core::RemotePlayerKey key{};
+    while(GetTickCount64()<deadline && !failed.load()){
+        const auto now=core::RemoteRoster::Clock::now();core::RemotePlayerFrames frame{};
+        if(connected && !announced){announced=true;std::puts("udp_binding_ready");}
+        const auto result=f.consume(now);
+        if(result==rb::Result::no_input && key.player &&
+           f.controller.tryRead(now,frame) && frame.count==0 && frame.endedCount){
+            check(walk && turn && neutral && expired,"real inputs and packet gap precede leave");
+            check(f.binding->state()==rb::State::live && f.binding->key()==key && f.api.creates==1 && !f.api.removes,"leave retains sole owned entity");
+            check(f.process(++serial,now)==rb::Result::processed && f.api.controls.current==core::PlayerControls{},"normal original keeps running neutral after leave");
+            std::puts("udp_binding_leave_retained_neutral PASS");return;
+        }
+        if(f.binding->state()==rb::State::live){
+            if(!key.player)key=f.binding->key();
+            check(f.binding->key()==key && f.api.authenticated.entity.slot==std::numeric_limits<unsigned>::max(),"same independent record");
+            check(f.process(++serial,now)==rb::Result::processed,"actual Binding consumes Controller on native-owner thread");
+            if(f.controller.tryRead(now,frame) && frame.count==1){
+                const auto& current=frame.players[0];const auto input=f.api.controls.current;
+                if(current.freshness==core::ControlFreshness::fresh && input==current.reference.controls){
+                    if(!walk && input.forward==1 && input.right==0){walk=true;std::puts("udp_binding_walk PASS");}
+                    if(walk && !turn && input.forward==0 && input.right==1){turn=true;std::puts("udp_binding_turn PASS");}
+                    if(turn && !neutral && input==core::PlayerControls{}){neutral=true;std::puts("udp_binding_controls_pass");}
+                }
+                if(neutral && current.freshness==core::ControlFreshness::input_timeout){
+                    check(input==core::PlayerControls{},"500ms packet loss releases controls");
+                    if(!expired){expired=true;std::puts("udp_binding_timeout_neutral PASS");}
+                }
+            }
+        }
+        Sleep(5);
+    }
+    throw std::runtime_error("UDP Binding deadline: server/synthetic input/timeout/leave not observed");
+}
+#endif
 void run(std::string_view which,const char* executable) {
     if (which=="gate") {
         static_assert(!rb::buildEnabled);
@@ -160,6 +226,52 @@ void run(std::string_view which,const char* executable) {
         check(!rb::inspectHoodlumPlayerContract(std::as_bytes(std::span(bytes))).exactExecutable,"one changed byte refuses identity");return;
     }
     Fixture f;
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+    if(which=="udp_relay" || which=="udp_absent"){
+        check(executable!=nullptr,"test-owned ephemeral endpoint required");
+        udpPipeline(f,static_cast<unsigned short>(std::stoul(executable)),which=="udp_absent");return;
+    }
+    if(which.starts_with("udp_")){
+        if(which=="udp_no_fresh"){
+            (void)f.roster.position({12,1,100,200,30},start);f.controller.synchronize(f.roster,start);
+            check(f.consume()==rb::Result::no_input && !f.api.creates,"position without controls cannot spawn");return;
+        }
+        f.admit();check(f.process(1)==rb::Result::processed,"first fresh input");
+        if(which=="udp_timeout"){
+            check(f.process(2,start+500ms)==rb::Result::processed && f.api.controls.current==core::PlayerControls{},"exact 500ms neutral input, original preserved");return;
+        }
+        if(which=="udp_identity"){
+            core::OnFootState changed{};changed.x=100;changed.y=200;changed.z=30;changed.controls={1,0,1};
+            (void)f.roster.position({12,2,100,200,30},start);
+            check(!f.controller.receive({999,12,2,changed},f.roster,start),"wrong recipient refused with otherwise valid roster");
+            check(f.process(2)==rb::Result::processed && f.api.controls.current.forward==1,"unadmitted packet never changes controls");return;
+        }
+        if(which=="udp_stale"){
+            f.sample(2,1,0);check(f.process(2)==rb::Result::processed && f.api.controls.current.right==1,"new wire input consumed");
+            core::OnFootState old{};old.x=100;old.y=200;old.z=30;old.controls={0,1,1};
+            check(!f.controller.receive({42,12,1,old},f.roster,start),"old sequence refused");
+            check(f.process(3)==rb::Result::processed && f.api.controls.current.right==1,"old input cannot overwrite latest");return;
+        }
+        if(which=="udp_f8"){
+            const auto probes=f.api.probes;check(f.binding->requestRemoval(f.api)==rb::Result::blocked_contract && f.api.probes==probes && !f.api.removes,"F8 closed without cleanup providers");
+            check(f.process(2)==rb::Result::processed,"F8 refusal does not poison active controls");return;
+        }
+        if(which=="udp_leave" || which=="udp_generation"){
+            if(which=="udp_leave")f.leave();else f.controller.beginSession(43);
+            const auto key=f.binding->key();check(f.consume(start+1ms)==rb::Result::no_input && !f.api.removes,"end cannot invoke destructive cleanup");
+            check(f.binding->key()==key && f.process(2,start+1ms)==rb::Result::processed && f.api.controls.current==core::PlayerControls{},"retained object processes neutral after logical end");
+            if(which=="udp_generation"){
+                core::OnFootState next{};next.x=100;next.y=200;next.z=30;next.controls={1,0,1};
+                check(f.controller.receive({43,12,1,next},f.roster,start+2ms),"new-session input admitted by Controller only");f.controller.synchronize(f.roster,start+2ms);
+                check(f.consume(start+2ms)==rb::Result::no_input && f.process(3,start+2ms)==rb::Result::processed &&
+                    f.api.controls.current==core::PlayerControls{} && f.binding->key()==key && f.api.creates==1,"new generation cannot replace or drive retained object");
+            }
+            return;
+        }
+        throw std::runtime_error("unknown UDP case");
+    }
+#endif
+
 #if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
     if(which=="armed_pending" || which=="armed_complete"){
         namespace m=rb::minimal_lifecycle;
@@ -437,6 +549,10 @@ void run(std::string_view which,const char* executable) {
     throw std::runtime_error("unknown test");
 }
 int main(int argc,char** argv) {
-    try { if (argc<2) return 2;run(argv[1],argc>2 ? argv[2] : nullptr);return 0; }
+    try {
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+        std::setvbuf(stdout,nullptr,_IONBF,0);
+#endif
+        if (argc<2) return 2;run(argv[1],argc>2 ? argv[2] : nullptr);return 0; }
     catch (const std::exception& e) { std::fprintf(stderr,"%s\n",e.what());return 1; }
 }
