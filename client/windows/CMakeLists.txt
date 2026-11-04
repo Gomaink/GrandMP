@@ -30,6 +30,10 @@ option(GRANDMP_ENABLE_INDEPENDENT_PLAYER_UDP "Receive UDP input in the isolated 
 if(GRANDMP_ENABLE_INDEPENDENT_PLAYER_UDP AND NOT GRANDMP_ENABLE_MINIMAL_NATIVE_LIFECYCLE)
     message(FATAL_ERROR "Independent UDP requires the complete validated Alpha 0.13.1 profile")
 endif()
+option(GRANDMP_ENABLE_REAL_PLAYER_SENDER "Capture local CJ into existing UDP snapshots; sender-only, no native remote" OFF)
+if(GRANDMP_ENABLE_REAL_PLAYER_SENDER AND NOT GRANDMP_ENABLE_INDEPENDENT_PLAYER_UDP)
+    message(FATAL_ERROR "Real sender requires the isolated independent UDP profile")
+endif()
 set(GRANDMP_CLEO4_SDK_DIR "" CACHE PATH "Exact CLEO4 4.4.4 cleo_sdk directory")
 set(GRANDMP_SANNY_COMPILER "" CACHE FILEPATH "Sanny Builder compiler, used offline only")
 if((GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP AND GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION) OR
@@ -59,7 +63,12 @@ if(GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP OR GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION
             "/MAP:$<TARGET_FILE_DIR:grandmp_independent_native_control_proof>/GrandMPPlayerBootstrap.map")
         target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_POOLED_REMOTE_PLAYER_BUILD=1
             GRANDMP_CLEO_PLAYER_SYNC_BUILD=1 GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD=1
-            GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=0 GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0 GRANDMP_NATIVE_INPUT_REPLAY_BUILD=0)
+            GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0 GRANDMP_NATIVE_INPUT_REPLAY_BUILD=0)
+        if(GRANDMP_ENABLE_REAL_PLAYER_SENDER)
+            target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_REAL_PLAYER_SENDER_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1)
+        else()
+            target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=0)
+        endif()
         if(GRANDMP_ENABLE_AUTHENTICATED_PAD_COW)
             target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_AUTHENTICATED_PAD_COW_BUILD=1)
         endif()
@@ -102,6 +111,11 @@ if(GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP OR GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION
             set_target_properties(grandmp_independent_native_control_proof PROPERTIES
                 RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-player-udp"
                 LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-player-udp")
+        endif()
+        if(GRANDMP_ENABLE_REAL_PLAYER_SENDER)
+            set_target_properties(grandmp_independent_native_control_proof PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-player-sender"
+                LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/independent-player-sender")
         endif()
     elseif(GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION)
         add_library(grandmp_remote_player_foundation MODULE EXCLUDE_FROM_ALL cleo/player_bootstrap.cpp

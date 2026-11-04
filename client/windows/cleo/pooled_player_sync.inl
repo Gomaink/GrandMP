@@ -16,6 +16,7 @@ void reportProcessingFailure() noexcept {
 }
 auto& nativeApi=bootstrapApi;
 bool foundationSpawn(ps::Position& ground) noexcept {return bootstrapApi && bootstrapApi->spawnGround(ground);}
+#if !defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) || GRANDMP_REAL_PLAYER_SENDER_BUILD != 1
 bool stageRemote() noexcept {
     grandmp::core::RemotePlayerFrames frames{};
     if(!bootstrapApi)return false;
@@ -42,7 +43,8 @@ bool stageRemote() noexcept {
     }
     return binding->state()==np::State::live; // A coherent leave must still reach consume.
 }
-#if !defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) || GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD != 1
+#endif
+#if !defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) || GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD != 1 || (defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) && GRANDMP_REAL_PLAYER_SENDER_BUILD == 1)
 bool nativeContext(void* value) noexcept {return context(value);}
 #endif
 bool inputContext(void*) noexcept {
@@ -63,10 +65,11 @@ bool inputCodeMatches() noexcept {
 void writeLog(const char* state,const char* reason) noexcept {
     if(!std::strcmp(state,"failed")){stopped.store(true);status.store(108);diagnostic.emit(diag::Note::sync_failure,reason);}
 }
-#if !defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) || GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD != 1
+#if !defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) || GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD != 1 || (defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) && GRANDMP_REAL_PLAYER_SENDER_BUILD == 1)
 #include "../tools/local_player_capture_runtime.inl"
 #endif
 void inputReport() noexcept {} // No per-frame logging or second task.
+#if !defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) || GRANDMP_REAL_PLAYER_SENDER_BUILD != 1
 bool installInputHook() noexcept {
     // The PRIVATE data table was published before World::Add, while no World
     // executor could reach this newly allocated object. This is only a readback.
@@ -132,6 +135,7 @@ __declspec(noinline) void __fastcall pooledControl(void* ped,void*) {
 std::uint32_t inputHookAddress() noexcept {
     return static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&pooledControl));
 }
+#endif
 #if !defined(GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD) || GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD != 1
 void presentRemote() noexcept {
     grandmp::core::RemotePlayerFrames frames{};

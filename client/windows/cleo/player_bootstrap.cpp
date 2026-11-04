@@ -365,7 +365,7 @@ DWORD WINAPI network(void*) {
 #if defined(GRANDMP_POOLED_REMOTE_PLAYER_BUILD) && GRANDMP_POOLED_REMOTE_PLAYER_BUILD == 1
         reportProcessingFailure(); // Copied values on existing worker, never GTA reads.
 #endif
-#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+#if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1 && (!defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) || GRANDMP_REAL_PLAYER_SENDER_BUILD != 1)
         net.tick(std::nullopt); // Existing receiver/Controller; no native capture or deterministic source.
 #else
         if(!net.tickLocal(localSnapshots)){stopped.store(true);status.store(106);diagnostic.emit(diag::Note::sync_failure,"network.tickLocal");break;}
@@ -404,6 +404,10 @@ DWORD WINAPI network(void*) {
 }
 #endif
 bool initialise() {
+#if defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) && GRANDMP_REAL_PLAYER_SENDER_BUILD == 1
+    wchar_t senderEnabled[4]{};GetEnvironmentVariableW(L"GRANDMP_REAL_INPUT_SENDER_ENABLE",senderEnabled,4);
+    if(std::wstring_view(senderEnabled)!=L"1")return refuse(diag::Note::initialise,"initialise.sender_opt_in");
+#endif
     HMODULE pin=nullptr;wchar_t path[32768]{};
     exceptionPoint="initialise.pin";
     if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(&initialise),&pin))
@@ -456,11 +460,19 @@ bool initialise() {
     DWORD table=static_cast<DWORD>(cleo.base+0x4E9B8);std::memcpy(game.mapped.data()+0x69FEE,&table,4);
     const DWORD displacement=static_cast<DWORD>(cleo.base+0xEF00-0x46A220);
     game.mapped[0x6A21B]=std::byte{0xE8};std::memcpy(game.mapped.data()+0x6A21C,&displacement,4);
-    scriptThread=GetCurrentThreadId();binding=np::Binding<true>::prepare(std::this_thread::get_id());
+    scriptThread=GetCurrentThreadId();
+#if !defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) || GRANDMP_REAL_PLAYER_SENDER_BUILD != 1
+    binding=np::Binding<true>::prepare(std::this_thread::get_id());
     if(!binding)return refuse(diag::Note::initialise,"initialise.Binding_prepare");
+#endif
     exceptionPoint="initialise.Api";
 #if defined(GRANDMP_POOLED_REMOTE_PLAYER_BUILD) && GRANDMP_POOLED_REMOTE_PLAYER_BUILD == 1
-    bootstrapApi.emplace(nf::Admission{nullptr,context,ready,spawn,inputContext},std::this_thread::get_id(),inputHookAddress()
+    bootstrapApi.emplace(nf::Admission{nullptr,context,ready,spawn,inputContext},std::this_thread::get_id(),
+#if defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) && GRANDMP_REAL_PLAYER_SENDER_BUILD == 1
+        0 // Read-only localIdentity provider; factoryProven also requires a nonzero private dispatch.
+#else
+        inputHookAddress()
+#endif
 #if defined(GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD) && GRANDMP_MINIMAL_NATIVE_LIFECYCLE_BUILD == 1
         ,cleanupReady,&removalBarrier
 #endif
@@ -587,6 +599,14 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
                         // The request is terminal. Do not suspend a still-admitted native control path.
                     }
 #endif
+#if defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) && GRANDMP_REAL_PLAYER_SENDER_BUILD == 1
+                    if(gameplayReady){
+                        const bool press6=(GetAsyncKeyState(VK_F6)&0x8000)!=0;
+                        if(press6 && !f6 && !armed){armed=true;status.store(2);diagnostic.emit(diag::Note::armed,"sender.F6_armed");}
+                        f6=press6;
+                        captureLocalPlayer(armed); // Only inside this authenticated native phase; F8 is inert.
+                    }else captureLocalPlayer(false);
+#else
                     if(gameplayReady){
                         const bool press6=(GetAsyncKeyState(VK_F6)&0x8000)!=0,press8=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
                         if(press6 && !f6 && !armed && !ended){armed=true;status.store(2);diagnostic.emit(diag::Note::armed,"tick.F6_armed");}
@@ -695,6 +715,7 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
                     else captureLocalPlayer(false); // Invalid context never reads native state.
 #endif
 #endif
+#endif
                 }
             }
         }
@@ -704,8 +725,12 @@ __declspec(noinline) OpcodeResult CALLBACK tick(CScriptThread* script) {
 #endif
     CLEO_SetIntOpcodeParam(script,status.load());
     // Return a pool handle, never a raw PED pointer. Only after live correlation.
+#if defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) && GRANDMP_REAL_PLAYER_SENDER_BUILD == 1
+    constexpr DWORD handle=UINT32_MAX; // Sender has no native remote entity or Binding instance.
+#else
     const DWORD handle=scriptThread==GetCurrentThreadId() && binding && binding->state()==np::State::live && status.load()==3 ?
         static_cast<DWORD>(binding->entityHandle()) : UINT32_MAX;
+#endif
     CLEO_SetIntOpcodeParam(script,handle);return OR_CONTINUE;
 }
 }

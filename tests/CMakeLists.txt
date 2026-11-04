@@ -975,10 +975,18 @@ if(BUILD_TESTING AND WIN32 AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
     foreach(udp_case no_fresh timeout identity stale f8 leave generation)
         add_test(NAME independent_udp_${udp_case} COMMAND grandmp_independent_udp_tests udp_${udp_case})
     endforeach()
+    add_test(NAME real_sender_absent_server COMMAND grandmp_independent_udp_tests sender_absent)
+    foreach(capture_case context read identity neutral positive)
+        add_test(NAME real_sender_capture_${capture_case} COMMAND grandmp_independent_udp_tests capture_${capture_case})
+    endforeach()
     if(Python3_Interpreter_FOUND)
         add_test(NAME independent_udp_relay_binding COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/independent_udp_loopback.py $<TARGET_FILE:grandmp_server>
             $<TARGET_FILE:grandmp_synthetic_client> $<TARGET_FILE:grandmp_independent_udp_tests>)
         set_tests_properties(independent_udp_relay_binding PROPERTIES TIMEOUT 30)
+        add_test(NAME real_sender_capture_udp_binding COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/real_sender_loopback.py $<TARGET_FILE:grandmp_server>
+            $<TARGET_FILE:grandmp_independent_udp_tests>)
+        set_tests_properties(real_sender_capture_udp_binding PROPERTIES TIMEOUT 25)
     endif()
 endif()

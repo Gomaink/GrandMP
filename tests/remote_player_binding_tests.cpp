@@ -3,6 +3,7 @@
 #if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
 #include <winsock2.h>
 #include "grandmp/windows/observer_network.hpp"
+#include "local_capture_fixture.hpp"
 #include <atomic>
 #endif
 #include <windows.h>
@@ -154,6 +155,74 @@ bool sehCall(Fixture* fixture,rb::ProcessObservation* observation=nullptr) {
     __except(GetExceptionCode()==0xE0421234 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { return true; }
 }
 #if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+void realSenderPipeline(Fixture& f,unsigned short port) {
+    capture_fixture::Host capture;core::RemotePlayerController senderController;
+    auto& snapshots=capture.localSnapshots;
+    std::atomic<bool> failed=false,reconnect=false;std::atomic<std::uint64_t> senderSession=0;
+    std::jthread receiver([&](std::stop_token stop){
+        windows::ObserverNetwork net;net.setRemotePlayerController(&f.controller);
+        if(!net.start(port) || !net.beginRemoteScenePreview()){failed=true;return;}
+        while(!stop.stop_requested()){net.tick(std::nullopt);Sleep(5);}net.stop();
+    });
+    std::jthread sender([&](std::stop_token stop){
+        windows::ObserverNetwork net;net.setRemotePlayerController(&senderController);
+        if(!net.start(port) || !net.beginRemoteScenePreview()){failed=true;return;}
+        while(!stop.stop_requested()){
+            if(reconnect.exchange(false)){
+                snapshots.session(0);snapshots.invalidate();net.stop();senderSession=0;net.setRemotePlayerController(&senderController);
+                if(!net.start(port) || !net.beginRemoteScenePreview()){failed=true;break;}
+            }
+            if(!net.tickLocal(snapshots)){failed=true;break;}
+            senderSession.store(net.sessionId());Sleep(5);
+        }
+        snapshots.session(0);snapshots.invalidate();net.stop();
+    });
+    const auto until=[&](auto predicate,unsigned ms=3000){
+        const auto end=GetTickCount64()+ms;
+        do {check(!failed,"network worker healthy");if(predicate())return;Sleep(5);}while(GetTickCount64()<end);
+        throw std::runtime_error("real sender pipeline deadline");
+    };
+    until([&]{return senderSession.load()!=0;});const auto session=senderSession.load();
+    capture.clockMs=GetTickCount64()-201;capture.captureLocalPlayer(true); // Existing measurement warmup, no invented velocity.
+    const std::array<std::pair<int,int>,9> axes{{{0,-60},{0,60},{-60,0},{60,0},{60,-60},{-60,-60},{60,60},{-60,60},{0,0}}};
+    std::uint64_t serial=0;std::uint32_t lastWireSequence=0;core::RemotePlayerKey key{};
+    for(const auto [x,y]:axes){
+        capture.pad(static_cast<std::int16_t>(x),static_cast<std::int16_t>(y));const float scale=(x && y) ? std::sqrt(2.f):1.f;
+        const float expectedX=(x/60.f)/scale,expectedY=(-y/60.f)/scale;
+        until([&]{
+            capture.clockMs=GetTickCount64();capture.captureLocalPlayer(true);
+            const auto now=core::RemoteRoster::Clock::now();(void)f.consume(now);
+            if(f.binding->state()!=rb::State::live)return false;
+            if(!key.player)key=f.binding->key();
+            check(f.binding->key()==key && f.process(++serial,now)==rb::Result::processed,"same receiver Binding consumes captured data");
+            core::RemotePlayerFrames wire{};
+            if(!f.controller.tryRead(now,wire) || wire.count!=1 || wire.players[0].key!=key ||
+                wire.players[0].sequence<=lastWireSequence || wire.players[0].freshness!=core::ControlFreshness::fresh)return false;
+            if(std::abs(wire.players[0].reference.controls.right-expectedX)>.001f ||
+                std::abs(wire.players[0].reference.controls.forward-expectedY)>.001f)return false;
+            const bool consumed=std::abs(f.api.controls.current.right-expectedX)<.001f &&
+                std::abs(f.api.controls.current.forward-expectedY)<.001f;
+            if(consumed)lastWireSequence=wire.players[0].sequence;return consumed;
+        });
+        std::printf("captured_pad=(%d,%d) binding=(%.4f,%.4f) PASS\n",int(x),int(y),
+            double(f.api.controls.current.right),double(f.api.controls.current.forward));
+    }
+    // No valid producer sample: worker never invents movement or repeats a revision.
+    capture.captureLocalPlayer(false);
+    until([&]{const auto now=core::RemoteRoster::Clock::now();core::RemotePlayerFrames frame{};
+        return f.controller.tryRead(now,frame) && frame.count==1 && frame.players[0].freshness==core::ControlFreshness::input_timeout;});
+    check(f.process(++serial,core::RemoteRoster::Clock::now())==rb::Result::processed && f.api.controls.current==core::PlayerControls{},"capture loss gives neutral original");
+    reconnect=true;until([&]{return senderSession.load()!=0 && senderSession.load()!=session;});
+    capture.pad(60,0);
+    until([&]{capture.clockMs=GetTickCount64();capture.captureLocalPlayer(true);core::RemotePlayerFrames frame{};
+        return f.controller.tryRead(core::RemoteRoster::Clock::now(),frame) && frame.count==1 &&
+            frame.players[0].freshness==core::ControlFreshness::fresh && frame.players[0].key.player==senderSession.load() && frame.players[0].key.generation>key.generation;});
+    const auto now=core::RemoteRoster::Clock::now();check(f.consume(now)==rb::Result::no_input &&
+        f.process(++serial,now)==rb::Result::processed && f.api.controls.current==core::PlayerControls{} &&
+        f.binding->key()==key && f.api.creates==1 && !f.api.removes,"reconnect uses new session; retained old receiver cannot be hijacked or destroyed");
+    check(!capture.wrongThread && capture.reads>0,"all capture reads remained on admitted producer thread");
+    std::puts("real_capture_runtime -> snapshots -> tickLocal -> UDP -> Controller -> Binding PASS (simulated game reads)");
+}
 void udpPipeline(Fixture& f,unsigned short port,bool absent) {
     std::atomic<bool> connected=false,failed=false;
     // Transport/Controller producer only. The existing backend is never passed to this thread.
@@ -227,6 +296,45 @@ void run(std::string_view which,const char* executable) {
     }
     Fixture f;
 #if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+    if(which=="sender_absent"){
+        WSADATA data{};check(WSAStartup(MAKEWORD(2,2),&data)==0,"fixture Winsock");
+        struct Cleanup {~Cleanup(){WSACleanup();}} cleanup;
+        const auto socket=::socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);check(socket!=INVALID_SOCKET,"unused endpoint");
+        struct Socket {SOCKET value;~Socket(){closesocket(value);}} reserved{socket};
+        sockaddr_in address{};address.sin_family=AF_INET;address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        check(bind(socket,reinterpret_cast<const sockaddr*>(&address),sizeof(address))==0,"reserve unanswered endpoint");
+        int size=sizeof(address);check(getsockname(socket,reinterpret_cast<sockaddr*>(&address),&size)==0,"reserved port");
+        capture_fixture::Host capture;std::atomic<bool> done=false,failed=false;
+        std::jthread worker([&]{windows::ObserverNetwork net;
+            if(!net.start(ntohs(address.sin_port)) || !net.beginRemoteScenePreview()){failed=true;done=true;return;}
+            for(unsigned n=0;n<30;++n){if(!net.tickLocal(capture.localSnapshots))failed=true;Sleep(5);}
+            if(net.sessionId() || net.sentSequence())failed=true;net.stop();done=true;
+        });
+        while(!done.load()){capture.clockMs=GetTickCount64();capture.captureLocalPlayer(true);Sleep(1);}
+        worker.join();check(!failed && !capture.reads && !capture.identityReads,"no server never queries native state; worker finishes");return;
+    }
+    if(which=="sender_pipeline"){
+        check(executable!=nullptr,"ephemeral endpoint required");realSenderPipeline(f,static_cast<unsigned short>(std::stoul(executable)));return;
+    }
+    if(which.starts_with("capture_")){
+        capture_fixture::Host h;h.localSnapshots.session(42);core::LocalPlayerSnapshots::Snapshot out{};
+        if(which=="capture_context"){
+            h.admitted=false;h.captureLocalPlayer(true);check(!h.reads && !h.identityReads,"context denial precedes native reads");
+            h.admitted=true;std::thread wrong([&]{h.captureLocalPlayer(true);});wrong.join();check(!h.reads && h.wrongThread==1,"wrong thread cannot read");return;
+        }
+        h.captureLocalPlayer(true);h.clockMs+=200;h.pad(0,-60);
+        if(which=="capture_read")h.refusedAddress=capture_fixture::Host::matrixAddress+0x30;
+        if(which=="capture_identity")h.identityChanged=true;
+        if(which=="capture_neutral")h.focused=false; // Existing capture policy only; no focus manipulation.
+        h.captureLocalPlayer(true);
+        if(which=="capture_read" || which=="capture_identity"){
+            check(!h.localSnapshots.take(h.clockMs,out),"unproven capture never publishes");
+            if(which=="capture_identity")check(h.localSourceStopped && h.failed,"identity change terminal");return;
+        }
+        check(h.localSnapshots.take(h.clockMs,out),"real capture body published coherent snapshot");
+        check(out.state.controls==(which=="capture_neutral" ? core::PlayerControls{}:core::PlayerControls{0,1,1}),"read-only input collection / unsupported neutral");
+        h.captureLocalPlayer(false);check(!h.localSnapshots.take(h.clockMs+200,out),"invalid gameplay invalidates stale input");return;
+    }
     if(which=="udp_relay" || which=="udp_absent"){
         check(executable!=nullptr,"test-owned ephemeral endpoint required");
         udpPipeline(f,static_cast<unsigned short>(std::stoul(executable)),which=="udp_absent");return;
