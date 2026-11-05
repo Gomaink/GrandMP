@@ -17,7 +17,7 @@ thread.start()
 try:
     line = ready.get(timeout=4)
     assert f"escutando em 127.0.0.1:{port};" in line, line
-    result = subprocess.run([sys.argv[2], "sender_pipeline", str(port)], capture_output=True, text=True, timeout=18)
+    result = subprocess.run([sys.argv[2], sys.argv[3] if len(sys.argv)>3 else "sender_pipeline", str(port)], capture_output=True, text=True, timeout=18)
     print(result.stdout)
     print(result.stderr)
     assert result.returncode == 0

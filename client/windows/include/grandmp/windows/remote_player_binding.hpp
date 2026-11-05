@@ -43,7 +43,7 @@ struct Controls {
     float viewHeading = 0;
     OnFootPadStates pad{}; // Prepared values; never automatically written into GTA.
 };
-enum class InputDisposition { fresh, neutral_missing, neutral_timeout, neutral_stale, neutral_contended };
+enum class InputDisposition { fresh, neutral_missing, neutral_timeout, neutral_stale, neutral_contended, retained_fresh };
 // Optional value-only observation. Marks existing calls; never probes the engine.
 enum class ProcessStep : unsigned { none, gate, owner, context, reentrancy, live, serial,
     replay, identity, dispatch, ownership, capture, capture_size, pad, apply,
@@ -168,6 +168,10 @@ public:
             if (selected->sequence<sequence_) return Result::stale;
             inputDisposition_=selected->freshness==core::ControlFreshness::fresh ? InputDisposition::fresh : InputDisposition::neutral_timeout;
             current_=selected->freshness==core::ControlFreshness::fresh ? selected->reference.controls : core::PlayerControls{};
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+            retainedInput_=selected->freshness==core::ControlFreshness::fresh ? *selected:core::RemotePlayerFrame{};
+            retainedController_=&controller;
+#endif
             viewHeading_=selected->reference.viewHeading; sequence_=selected->sequence;
             return Result::updated;
         }
@@ -252,11 +256,15 @@ public:
             current_={};state_=State::ownership_lost;return Result::ownership_lost;
         }
         // Re-read the real controller at the ORIGINAL dispatch. Pre-world input
-        // is not a freshness lease. Contention/expired input always means neutral.
+        // is not a freshness lease. Expiry/missing input means neutral; the isolated
+        // fidelity variant may retain a revocable, originally timestamped copy on contention.
         core::RemotePlayerFrames frames;
         current_={};
         inputDisposition_=InputDisposition::neutral_contended;
         if (controller.tryRead(now,frames)) {
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+            retainedInput_={}; // Missing/stale/expired input from a successful read is authoritative.
+#endif
             const core::RemotePlayerFrame* frame=nullptr;
             for (std::size_t n=0;n<frames.count && n<frames.players.size();++n)
                 if (frames.players[n].key==record_.key) { frame=&frames.players[n];break; }
@@ -270,11 +278,21 @@ public:
                     inputDisposition_=InputDisposition::neutral_timeout;
                     if (frame->freshness==core::ControlFreshness::fresh) {
                         current_=frame->reference.controls;inputDisposition_=InputDisposition::fresh;
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+                        retainedInput_=*frame;retainedController_=&controller;
+#endif
                     }
                     viewHeading_=frame->reference.viewHeading;sequence_=frame->sequence;
                 }
             }
         }
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+        if(inputDisposition_==InputDisposition::neutral_contended && retainedController_==&controller &&
+           core::freshControlLease(retainedInput_,record_.key,sequence_,controller.inputEpoch(),now)) {
+            current_=retainedInput_.reference.controls;viewHeading_=retainedInput_.reference.viewHeading;
+            inputDisposition_=InputDisposition::retained_fresh;
+        }
+#endif
         ContextImage saved;
         if (!probe(ProcessStep::capture,[&]{return api.capture(saved);}) || !check(ProcessStep::capture_size,saved.used && saved.used<=saved.bytes.size())) {state_=State::poisoned;return Result::context_failed;}
         busy_=true;state_=State::poisoned;lastDispatch_=dispatch.serial;
@@ -358,6 +376,10 @@ private:
     }
     std::thread::id owner_;
     Record record_{};
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+    core::RemotePlayerFrame retainedInput_{}; // Copied controls only; no PED/pad pointers.
+    const core::RemotePlayerController* retainedController_=nullptr; // Native consumer only; source-instance fence.
+#endif
     core::PlayerControls current_{},previous_{};
     float viewHeading_=0;
     std::uint64_t generationFloor_=0,lastDispatch_=0;

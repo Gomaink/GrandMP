@@ -4,6 +4,9 @@
 #include <winsock2.h>
 #include "grandmp/windows/observer_network.hpp"
 #include "local_capture_fixture.hpp"
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+#include "grandmp/server/sessions.hpp"
+#endif
 #include <atomic>
 #endif
 #include <windows.h>
@@ -23,6 +26,13 @@
 #include <string_view>
 #include <vector>
 
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+namespace grandmp::core {
+struct RemotePlayerControllerTestAccess {
+    static std::unique_lock<std::mutex> lock(RemotePlayerController& value){return std::unique_lock(value.mutex_);}
+};
+}
+#endif
 using namespace grandmp;
 namespace rb=windows::remote_player_binding;
 namespace semantic=windows::semantic_pad_context;
@@ -155,6 +165,104 @@ bool sehCall(Fixture* fixture,rb::ProcessObservation* observation=nullptr) {
     __except(GetExceptionCode()==0xE0421234 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { return true; }
 }
 #if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+void heldSenderPipeline(Fixture& f,unsigned short port) {
+    capture_fixture::Host capture;core::RemotePlayerController senderController;
+    std::atomic<bool> failed=false;std::atomic<std::uint64_t> session=0;std::atomic<unsigned> sent=0;
+    std::jthread receiver([&](std::stop_token stop){
+        windows::ObserverNetwork net;net.setRemotePlayerController(&f.controller);
+        if(!net.start(port) || !net.beginRemoteScenePreview()){failed=true;return;}
+        while(!stop.stop_requested()){net.tick(std::nullopt);Sleep(5);}net.stop();
+    });
+    std::jthread sender([&](std::stop_token stop){
+        windows::ObserverNetwork net;net.setRemotePlayerController(&senderController);
+        if(!net.start(port) || !net.beginRemoteScenePreview()){failed=true;return;}
+        while(!stop.stop_requested()){
+            if(!net.tickLocal(capture.localSnapshots)){failed=true;return;}
+            session=net.sessionId();sent=net.sentSequence();Sleep(20);
+        }
+        capture.localSnapshots.session(0);capture.localSnapshots.invalidate();net.stop();
+    });
+    const auto deadline=GetTickCount64()+4000;
+    while(!session && !failed && GetTickCount64()<deadline)Sleep(5);
+    check(session && !failed,"real transport session");
+    capture.pad(0,-60);capture.clockMs=GetTickCount64()-201;capture.captureLocalPlayer(true);
+    std::uint64_t serial=0,heldAt=0,releaseAt=0,lastReceived=0,lastPacketAt=0,maxGap=0;
+    unsigned received=0,consumed=0,active=0,neutral=0,contended=0,retained=0;
+    const auto end=GetTickCount64()+9000;
+    while(GetTickCount64()<end){
+        check(!failed,"held input worker healthy");const auto now=GetTickCount64();
+        if(heldAt && now-heldAt>=5000 && !releaseAt){releaseAt=now;capture.pad(0,0,false);}
+        capture.clockMs=now;capture.captureLocalPlayer(true);
+        const auto time=core::RemoteRoster::Clock::now();(void)f.consume(time);
+        core::RemotePlayerFrames frames{};
+        if(f.controller.tryRead(time,frames) && frames.count==1 && frames.players[0].sequence>lastReceived){
+            lastReceived=frames.players[0].sequence;++received;
+            if(lastPacketAt)maxGap=std::max(maxGap,now-lastPacketAt);lastPacketAt=now;
+        }
+        if(f.binding->state()==rb::State::live){
+            check(f.process(++serial,time)==rb::Result::processed,"one original and complete restoration per native dispatch");
+            const bool walking=f.api.controls.current.forward==1 && f.api.controls.current.right==0;
+            if(walking && !heldAt)heldAt=now;
+            if(heldAt && !releaseAt){
+                ++consumed;if(walking)++active;else ++neutral;
+                if(f.binding->inputDisposition()==rb::InputDisposition::neutral_contended)++contended;
+                if(f.binding->inputDisposition()==rb::InputDisposition::retained_fresh)++retained;
+            }
+            if(releaseAt && f.api.controls.current==core::PlayerControls{} && f.binding->inputDisposition()==rb::InputDisposition::fresh){
+                std::printf("held_ms=%llu published=%u sent=%u received_unique=%u consumed=%u active=%u neutral=%u contended=%u retained=%u max_receive_gap_ms=%llu release_ms=%llu\n",
+                    static_cast<unsigned long long>(releaseAt-heldAt),capture.localSnapshots.publications,sent.load(),received,consumed,active,neutral,contended,retained,
+                    static_cast<unsigned long long>(maxGap),static_cast<unsigned long long>(now-releaseAt));
+                check(releaseAt-heldAt>=5000 && active>100 && neutral==contended,"healthy five-second hold has no unexplained neutral input");
+                check(f.api.originals==serial && f.api.restores==serial && f.api.creates==1 && !f.api.removes,"original once, shared context restored, no cleanup");
+                check(!capture.wrongThread,"only native producer reads simulated GTA state");return;
+            }
+        }
+        Sleep(16);
+    }
+    check(false,"held input/release deadline");
+}
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+void fidelityLossTrace(bool fidelity) {
+    Fixture f;capture_fixture::Host capture(fidelity);capture.localSnapshots.session(42);
+    server::SessionTable relay(12);const server::Endpoint endpoint{{127,0,0,1},12345};
+    check(relay.handle(protocol::Hello{1},endpoint,start).sessionId==12,"real session contract");
+    capture.clockMs=800;capture.pad(0,-60);capture.captureLocalPlayer(true);
+    unsigned sent=0,received=0,consumed=0,neutral=0,held=0;std::uint64_t serial=0,lastDelivery=0,maxGap=0,nextWorker=1000,worker=0;
+    for(std::uint64_t ms=1000;ms<=6400;ms+=4){
+        if(ms%16==8){capture.clockMs=ms;if(ms>=6000)capture.pad(0,0,false);capture.captureLocalPlayer(true);}
+        const auto time=start+std::chrono::milliseconds(ms);
+        if(ms>=nextWorker){
+            // Irregular 20/40 ms servicing, not a new production transport.
+            nextWorker=ms+(++worker%4==0 ? 40:20);core::LocalPlayerSnapshots::Snapshot sample{};
+            if(capture.localSnapshots.take(ms,sample)){
+                ++sent;
+                if(sent%10!=4 && sent%10!=5){ // Two consecutive datagrams lost, deterministically.
+                    const auto wire=protocol::encode(protocol::PlayerOnFoot{12,sent,sample.state});check(wire.has_value(),"wire encoding");
+                    const auto decoded=protocol::decode(*wire);check(decoded.message.has_value(),"wire decoding");
+                    const auto event=relay.handle(*decoded.message,endpoint,time);
+                    check(event.kind==server::EventKind::on_foot_accepted,"same input/new sequence accepted, server >=100ms");
+                    check(relay.handle(*decoded.message,endpoint,time).kind==server::EventKind::rejected_sequence,"duplicate wire sequence refused");
+                    check(event.onFoot.has_value(),"relay copied controls");
+                    const auto& state=event.onFoot->state;
+                    f.sample(sent,state.controls.right,state.controls.forward,time);
+                    ++received;if(lastDelivery)maxGap=std::max(maxGap,ms-lastDelivery);lastDelivery=ms;
+                }
+            }
+        }
+        if(ms%16==8){
+            (void)f.consume(time);
+            if(f.binding->state()==rb::State::live){
+                check(f.process(++serial,time)==rb::Result::processed,"irregular native dispatch restored");
+                if(ms<6000){++consumed;if(f.api.controls.current.forward==1)++held;else ++neutral;}
+            }
+        }
+    }
+    std::printf("loss_trace profile=%s held_window_ms=5000 published=%u sent=%u received=%u consumed=%u active=%u neutral=%u max_delivery_gap_ms=%llu\n",
+        fidelity ? "fidelity":"legacy",capture.localSnapshots.publications,sent,received,consumed,held,neutral,static_cast<unsigned long long>(maxGap));
+    check(fidelity ? neutral==0:neutral>0,"bounded cadence absorbs the tested two-packet loss without extending timeout");
+    check(f.api.controls.current==core::PlayerControls{} && f.api.originals==serial && f.api.restores==serial,"release ends movement, original once, no native mutation shortcuts");
+}
+#endif
 void realSenderPipeline(Fixture& f,unsigned short port) {
     capture_fixture::Host capture;core::RemotePlayerController senderController;
     auto& snapshots=capture.localSnapshots;
@@ -296,6 +404,74 @@ void run(std::string_view which,const char* executable) {
     }
     Fixture f;
 #if defined(GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD) && GRANDMP_INDEPENDENT_PLAYER_UDP_BUILD == 1
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+    if(which=="fidelity_loss_before" || which=="fidelity_loss_after"){fidelityLossTrace(which=="fidelity_loss_after");return;}
+    if(which=="fidelity_queue"){
+        core::LocalPlayerSnapshots box(core::LocalPlayerSnapshots::Profile::input_fidelity);box.session(42);
+        core::OnFootState input{};input.controls={0,1,1};core::LocalPlayerSnapshots::Snapshot copy{};
+        check(box.publish({42,box.nextRevision(),1000,input}) && box.take(1000,copy),"initial copy");
+        check(!box.take(1119,copy) && box.take(1120,copy) && copy.capturedMs==1000,"same value retained, original age, bounded period");
+        check(!box.take(1240,copy),"source lease expires at 200ms, never a heartbeat without capture");
+        box.session(43);check(!box.publish({42,box.nextRevision(),1300,input}) && !box.take(1300,copy),"session fence");
+        check(box.publish({43,box.nextRevision(),1400,input}),"new session publication");box.invalidate();check(!box.take(1400,copy),"invalidation defeats fresh reuse");return;
+    }
+    if(which=="fidelity_publish"){
+        capture_fixture::Host h;h.localSnapshots.session(42);h.captureLocalPlayer(true);h.clockMs+=100;h.pad(0,-60);h.captureLocalPlayer(true);
+        const auto published=h.localSnapshots.publications;h.clockMs+=100;h.localSnapshots.rejectNext=true;h.captureLocalPlayer(true);
+        core::LocalPlayerSnapshots::Snapshot out{};check(h.localSnapshots.publications==published && h.localSnapshots.take(h.clockMs,out),"try-lock miss retains still-fresh prior copy");
+        check(out.capturedMs==1100 && !h.localSnapshots.take(1300,out),"retention never renews sample age");return;
+    }
+    if(which=="fidelity_focus"){
+        capture_fixture::Host h;h.localSnapshots.session(42);h.pad(0,-60);h.captureLocalPlayer(true);h.clockMs=1100;h.captureLocalPlayer(true);
+        core::LocalPlayerSnapshots::Snapshot out{};check(h.localSnapshots.take(1100,out) && out.state.controls.forward==1,"focused captured input");
+        h.focused=false;h.clockMs=1220;h.captureLocalPlayer(true);check(h.localSnapshots.take(1220,out) && out.state.controls==core::PlayerControls{},"loss of focus publishes neutral");
+        h.focused=true;h.clockMs=1340;h.captureLocalPlayer(true);check(h.localSnapshots.take(1340,out) && out.state.controls.forward==1,"fresh input on focus return, no focus modifications");return;
+    }
+    if(which=="fidelity_controller"){
+        f.admit();check(f.process(1)==rb::Result::processed,"old Controller cached");
+        core::RemotePlayerController other;other.beginSession(999);
+        check(other.inputEpoch()==f.controller.inputEpoch(),"epochs can coincide across source instances");
+        std::atomic<bool> locked=false;
+        std::jthread holder([&](std::stop_token stop){auto lock=core::RemotePlayerControllerTestAccess::lock(other);locked=true;
+            while(!stop.stop_requested())Sleep(1);});while(!locked)Sleep(1);
+        check(f.binding->process(other,start,{f.binding->key(),f.api.authenticated.entity.ped,2},f.api)==rb::Result::processed &&
+            f.api.controls.current==core::PlayerControls{},"another Controller cannot reuse a cached source lease");return;
+    }
+    if(which=="fidelity_lease" || which=="fidelity_revoke" || which=="fidelity_session" || which=="fidelity_restore"){
+        f.admit();check(f.process(1)==rb::Result::processed,"cache a real controller frame");
+        core::RemotePlayerFrames frames{};check(f.controller.tryRead(start,frames),"read current lease");const auto cached=frames.players[0];
+        check(core::freshControlLease(cached,f.binding->key(),1,f.controller.inputEpoch(),start+499ms),"original lease fresh at 499ms");
+        check(!core::freshControlLease(cached,f.binding->key(),1,f.controller.inputEpoch(),start+500ms) &&
+            !core::freshControlLease(cached,{12,cached.key.generation+1},1,f.controller.inputEpoch(),start) &&
+            !core::freshControlLease(cached,f.binding->key(),2,f.controller.inputEpoch(),start) &&
+            !core::freshControlLease(cached,f.binding->key(),1,UINT64_MAX,start) &&
+            !core::freshControlLease(cached,f.binding->key(),1,f.controller.inputEpoch(),start-1ms),"expiry/key/sequence/clock/saturation fail closed");
+        auto unknown=cached;unknown.freshness=core::ControlFreshness::awaiting_controls;
+        check(!core::freshControlLease(unknown,f.binding->key(),1,f.controller.inputEpoch(),start),"unknown input cannot lease");
+        unknown=cached;unknown.reference.controls.forward=NAN;
+        check(!core::freshControlLease(unknown,f.binding->key(),1,f.controller.inputEpoch(),start),"invalid input cannot lease");
+        if(which=="fidelity_revoke")f.controller.endRemote(12,core::RemoteEndReason::server_leave);
+        if(which=="fidelity_session")f.controller.beginSession(43);
+        const bool invalid=which!="fidelity_lease";
+        std::atomic<bool> locked=false;
+        std::jthread holder([&](std::stop_token stop){auto lock=core::RemotePlayerControllerTestAccess::lock(f.controller);locked=true;
+            while(!stop.stop_requested())Sleep(1);});
+        while(!locked)Sleep(1);
+        if(which=="fidelity_restore"){
+            f.api.restoreOkay=false;
+            check(f.process(2,start+499ms)==rb::Result::restore_failed && f.binding->inputDisposition()==rb::InputDisposition::retained_fresh,"retained input cannot waive restoration");
+            check(f.process(3,start+499ms)==rb::Result::indeterminate && f.api.originals==2 && f.api.restores==2,"terminal restoration failure cannot reuse even a fresh lease");return;
+        }
+        check(f.process(2,start+499ms)==rb::Result::processed,"contended dispatch still calls original exactly once");
+        check(invalid ? f.api.controls.current==core::PlayerControls{} :
+            (f.api.controls.current.forward==1 && f.binding->inputDisposition()==rb::InputDisposition::retained_fresh),"revocation dominates cache; only unrevoked fresh input retained");
+        check(f.process(3,start+500ms)==rb::Result::processed && f.api.controls.current==core::PlayerControls{},"prolonged contention cannot extend the 500ms lease");
+        check(f.api.originals==3 && f.api.restores==3 && !f.api.removes,"original/restoration/lifecycle unchanged");return;
+    }
+#endif
+    if(which=="sender_hold"){
+        check(executable!=nullptr,"test port required");heldSenderPipeline(f,static_cast<unsigned short>(std::stoul(executable)));return;
+    }
     if(which=="sender_absent"){
         WSADATA data{};check(WSAStartup(MAKEWORD(2,2),&data)==0,"fixture Winsock");
         struct Cleanup {~Cleanup(){WSACleanup();}} cleanup;

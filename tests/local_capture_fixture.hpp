@@ -7,6 +7,7 @@
 #include <optional>
 #include <thread>
 #include <vector>
+#include <utility>
 namespace capture_fixture {
 namespace np=grandmp::windows::remote_player_binding;
 namespace nf=np::second_player;
@@ -15,7 +16,25 @@ namespace ni=np::replay;
 struct Host {
     static constexpr std::uint32_t ped=0x10000,matrixAddress=0x20000; // Fixture addresses, not a process mapping.
     const std::thread::id owner=std::this_thread::get_id();
-    grandmp::core::LocalPlayerSnapshots localSnapshots;
+    struct Snapshots {
+        using Queue=grandmp::core::LocalPlayerSnapshots;
+        Queue queue;
+        explicit Snapshots(bool fidelity) : queue(fidelity ? Queue::Profile::input_fidelity:Queue::Profile::legacy) {}
+        std::uint64_t captureIntervalMs() const noexcept {return queue.captureIntervalMs();}
+        bool retainFreshOnPublishFailure() const noexcept {return queue.retainFreshOnPublishFailure();}
+        unsigned publications=0;
+        bool rejectNext=false;
+        operator Queue&() noexcept {return queue;}
+        void session(std::uint64_t value) noexcept {queue.session(value);}
+        std::uint64_t session() const noexcept {return queue.session();}
+        void invalidate() noexcept {queue.invalidate();}
+        std::uint64_t nextRevision() noexcept {return queue.nextRevision();}
+        bool take(std::uint64_t now,Queue::Snapshot& value) noexcept {return queue.take(now,value);}
+        bool publish(Queue::Snapshot value) noexcept {
+            if(std::exchange(rejectNext,false))return false; // Simulated try-lock miss, no fake game behavior.
+            const bool okay=queue.publish(value);if(okay)++publications;return okay;
+        }
+    } localSnapshots;
     np::LocalKinematics localKinematics;
     std::optional<nf::LocalIdentity> localIdentity;
     std::atomic<bool> localSourceStopped{false};
@@ -59,7 +78,13 @@ struct Host {
         std::memcpy(bytes.data(),&right,2);std::memcpy(bytes.data()+2,&forward,2);
         std::memcpy(bytes.data()+0x2A,&flag,2);store(nf::pad0,bytes);
     }
-    Host(){
+    explicit Host(bool fidelity=
+#if defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+        true
+#else
+        false
+#endif
+        ) : localSnapshots(fidelity) {
         store(ped+0x14,matrixAddress);store(matrixAddress+0x30,ps::Position{100,200,30});store(matrixAddress+0x10,ps::Position{0,1,0});
         pad(0,0);store(nf::pad0+0x10E,std::uint16_t{0});store(nf::pad0+0x10A,std::uint16_t{0});
         store(ps::playerIndex,std::uint8_t{0});store(ped+0x718,std::uint8_t{0});

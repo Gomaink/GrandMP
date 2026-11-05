@@ -34,6 +34,10 @@ option(GRANDMP_ENABLE_REAL_PLAYER_SENDER "Capture local CJ into existing UDP sna
 if(GRANDMP_ENABLE_REAL_PLAYER_SENDER AND NOT GRANDMP_ENABLE_INDEPENDENT_PLAYER_UDP)
     message(FATAL_ERROR "Real sender requires the isolated independent UDP profile")
 endif()
+option(GRANDMP_ENABLE_INPUT_FIDELITY "Bounded input retention/cadence in the independent UDP profiles" OFF)
+if(GRANDMP_ENABLE_INPUT_FIDELITY AND NOT GRANDMP_ENABLE_INDEPENDENT_PLAYER_UDP)
+    message(FATAL_ERROR "Input fidelity requires the isolated independent UDP profile")
+endif()
 set(GRANDMP_CLEO4_SDK_DIR "" CACHE PATH "Exact CLEO4 4.4.4 cleo_sdk directory")
 set(GRANDMP_SANNY_COMPILER "" CACHE FILEPATH "Sanny Builder compiler, used offline only")
 if((GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP AND GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION) OR
@@ -64,6 +68,9 @@ if(GRANDMP_BUILD_CLEO_PLAYER_BOOTSTRAP OR GRANDMP_BUILD_REMOTE_PLAYER_FOUNDATION
         target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_POOLED_REMOTE_PLAYER_BUILD=1
             GRANDMP_CLEO_PLAYER_SYNC_BUILD=1 GRANDMP_INDEPENDENT_NATIVE_CONTROL_PROOF_BUILD=1
             GRANDMP_NATIVE_SECOND_PLAYER_EXECUTION_BUILD=0 GRANDMP_NATIVE_INPUT_REPLAY_BUILD=0)
+        if(GRANDMP_ENABLE_INPUT_FIDELITY)
+            target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_INPUT_FIDELITY_BUILD=1)
+        endif()
         if(GRANDMP_ENABLE_REAL_PLAYER_SENDER)
             target_compile_definitions(grandmp_independent_native_control_proof PRIVATE GRANDMP_REAL_PLAYER_SENDER_BUILD=1 GRANDMP_NATIVE_LOCAL_CAPTURE_BUILD=1)
         else()

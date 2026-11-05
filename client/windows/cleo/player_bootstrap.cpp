@@ -98,7 +98,11 @@ auto& gameThread=scriptThread;
 auto& phaseDispatchActive=borrowed;
 auto& nativeBinding=binding;
 auto& nativePlayers=bootstrapController;
+#if defined(GRANDMP_REAL_PLAYER_SENDER_BUILD) && GRANDMP_REAL_PLAYER_SENDER_BUILD == 1 && defined(GRANDMP_INPUT_FIDELITY_BUILD) && GRANDMP_INPUT_FIDELITY_BUILD == 1
+grandmp::core::LocalPlayerSnapshots localSnapshots{grandmp::core::LocalPlayerSnapshots::Profile::input_fidelity};
+#else
 grandmp::core::LocalPlayerSnapshots localSnapshots;
+#endif
 std::atomic<bool> localSourceStopped{false};
 np::LocalKinematics localKinematics;
 std::optional<nf::LocalIdentity> localIdentity;

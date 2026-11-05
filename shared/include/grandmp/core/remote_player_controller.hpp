@@ -2,6 +2,8 @@
 
 #include "grandmp/core/remote_player_scene.hpp"
 #include <array>
+#include <atomic>
+#include <limits>
 #include <mutex>
 
 namespace grandmp::core {
@@ -34,6 +36,8 @@ struct RemotePlayerFrame {
     OnFootState reference{}; // Reconciliation reference ONLY, never an applyPose command.
     RemotePose presentation{}; // Existing Scene interpolation, kept separate from controls.
     ControlFreshness freshness = ControlFreshness::awaiting_controls;
+    RemoteRoster::Time inputReceived{}; // Original receiver timestamp, never renewed by a consumer.
+    std::uint64_t revocationEpoch=0; // Value-only lease, NOT native ownership.
 };
 struct RemotePlayerFrames {
     std::uint64_t recipientSession = 0;
@@ -42,6 +46,16 @@ struct RemotePlayerFrames {
     std::size_t endedCount=0;
     std::array<RemotePlayerEnd,RemoteRoster::maxPlayers> ended{};
 };
+
+// Contention may retain only a previously read fresh input for this exact key.
+// Lifecycle changes revoke the lease under the same mutex as their publication.
+inline bool freshControlLease(const RemotePlayerFrame& frame,RemotePlayerKey key,
+                              std::uint32_t minimumSequence,std::uint64_t epoch,RemoteRoster::Time now) noexcept {
+    return key.player && key.generation && epoch && epoch!=std::numeric_limits<std::uint64_t>::max() && frame.revocationEpoch==epoch &&
+        frame.key==key && frame.sequence && frame.sequence>=minimumSequence &&
+        frame.freshness==ControlFreshness::fresh && validOnFoot(frame.reference) &&
+        now>=frame.inputReceived && now-frame.inputReceived<onFootInputTimeout;
+}
 
 // Network/Scene producer. Consumer receives COPIES via nonblocking tryRead;
 // nothing here owns a PED, CPad, task, native pointer or entity backend.
@@ -60,7 +74,9 @@ public:
     // Snapshot is NOT an ownership reservation. A future native binding must
     // revalidate entity/context and preserve/restore the complete local context.
     [[nodiscard]] bool tryRead(Time now, RemotePlayerFrames& out) const noexcept;
+    std::uint64_t inputEpoch() const noexcept {return inputEpoch_.load(std::memory_order_acquire);}
 private:
+    friend struct RemotePlayerControllerTestAccess; // Deterministic mutex contention in the existing offline host only.
     struct Entry {
         RemotePlayerFrame frame{};
         Time received{};
@@ -73,6 +89,8 @@ private:
     Entry* admit(std::uint64_t id) noexcept;
     void rememberEnd(Entry&,RemoteEndReason) noexcept; // mutex held
 
+    void revokeInputLeases() noexcept; // mutex held; saturation disables retention, never wraps.
+    std::atomic<std::uint64_t> inputEpoch_{1};
     RemotePlayerScene scene_;
     mutable std::mutex mutex_;
     std::array<Entry,RemoteRoster::maxPlayers> entries_{};

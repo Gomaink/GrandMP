@@ -16,8 +16,13 @@ RemotePlayerController::Entry* RemotePlayerController::admit(std::uint64_t id) n
     }
     return nullptr;
 }
+void RemotePlayerController::revokeInputLeases() noexcept {
+    const auto epoch=inputEpoch_.load(std::memory_order_relaxed);
+    if(epoch!=std::numeric_limits<std::uint64_t>::max())inputEpoch_.store(epoch+1,std::memory_order_release);
+}
 void RemotePlayerController::rememberEnd(Entry& entry,RemoteEndReason reason) noexcept {
     if (entry.frame.key.player) {
+        revokeInputLeases();
         ended_[endedCursor_]={entry.frame.key,reason};
         endedCursor_=(endedCursor_+1)%ended_.size();
         if (endedCount_<ended_.size()) ++endedCount_;
@@ -31,6 +36,7 @@ void RemotePlayerController::endRemote(std::uint64_t id,RemoteEndReason reason) 
 void RemotePlayerController::beginSession(std::uint64_t recipient,RemoteEndReason reason) noexcept {
     {
         std::lock_guard lock(mutex_);
+        revokeInputLeases();
         for (auto& e:entries_) rememberEnd(e,reason);
         recipient_=0; // Publish invalidation before any old Scene callback.
     }
@@ -77,7 +83,7 @@ bool RemotePlayerController::tryRead(Time now, RemotePlayerFrames& out) const no
     out.recipientSession=recipient_;
     out.endedCount=endedCount_;out.ended=ended_;
     for (const auto& e : entries_) if (e.visible) {
-        auto frame=e.frame;
+        auto frame=e.frame;frame.inputReceived=e.received;frame.revocationEpoch=inputEpoch();
         if (frame.sequence && (now<e.received || now-e.received>=inputTimeout)) {
             frame.freshness=ControlFreshness::input_timeout;
             frame.reference.controls={}; // Lost UDP cannot hold walking input forever.

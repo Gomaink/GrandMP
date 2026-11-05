@@ -4,7 +4,7 @@ void captureLocalPlayer(bool gameplay) noexcept {
     if (!gameplay || !session || !nativeApi || !nativeContext(nullptr) || localSourceStopped.load()) {
         localSnapshots.invalidate();localKinematics.reset();return;
     }
-    if (now>=localCaptureMs && now-localCaptureMs<200) return;
+    if (now>=localCaptureMs && now-localCaptureMs<localSnapshots.captureIntervalMs()) return;
     localCaptureMs=now;
     nf::LocalIdentity before{},after{};
     if (!nativeApi->localIdentity(before)) { localSnapshots.invalidate();localKinematics.reset();return; }
@@ -34,5 +34,7 @@ void captureLocalPlayer(bool gameplay) noexcept {
     if (!disabled && padMode<=3 && foreground==GetCurrentProcessId() && weapon==0 && weaponType==0 && !target &&
         (flags&1) && !(flags&0x04000100) && !car && !cameraMode) (void)np::collectOnFootPad(pad,state.controls);
     const auto revision=localSnapshots.nextRevision();
-    if (!localSnapshots.publish({session,revision,now,state})) localSnapshots.invalidate();
+    // Try-lock publication can fail while the previous copied value is still fresh.
+    // Only the fidelity profile retains that value, with its ORIGINAL age/session.
+    if (!localSnapshots.publish({session,revision,now,state}) && !localSnapshots.retainFreshOnPublishFailure()) localSnapshots.invalidate();
 }
